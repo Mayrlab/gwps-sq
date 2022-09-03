@@ -1,0 +1,94 @@
+---
+title: "Filter KD6 Essential scUTRquant Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Counts from scUTRquant include all cells passing the UMI threshold. We will filter
+to only those cells annotated in the published data.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(SingleCellExperiment)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+FILE_SCE_TX="data/sce/kd6_essential.txs.Rds"
+FILE_SCE_GENE="data/sce/kd6_essential.genes.Rds"
+
+OUT_SCE_TX="data/sce/kd6_essential.annot.txs.Rds"
+OUT_SCE_GENE="data/sce/kd6_essential.annot.genes.Rds"
+```
+
+
+# Data
+## Transcripts
+```{r load_txs, message=FALSE}
+sce_txs <- readRDS(FILE_SCE_TX)
+
+idx_cells <- !is.na(sce_txs$gem_group)
+sce_txs %<>% `[`(, idx_cells)
+
+gc()
+```
+
+### Export
+```{r export_txs}
+saveRDS(sce_txs, OUT_SCE_TX)
+```
+
+### Clean Up
+```{r clean_up}
+rm(idx_cells, sce_txs)
+gc()
+```
+
+## Genes
+```{r load_genes, message=FALSE}
+sce_genes <- readRDS(FILE_SCE_GENE)
+
+idx_cells <- !is.na(sce_genes$gem_group)
+sce_genes %<>% `[`(, idx_cells)
+
+gc()
+```
+
+### Export
+```{r export_genes}
+saveRDS(sce_genes, OUT_SCE_GENE)
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

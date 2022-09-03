@@ -1,0 +1,144 @@
+---
+title: "Prepare scUTRquant - K562 Day 6 Essential"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We process the various sources of metadata to produce files compatible with running scUTRquant.
+
+Please note the final URLs have to manually checked. Still SRA does not provide a
+programmatic way to look up raw file URLs. *Most* of the AWS links use `sra-pub-src-2`,
+but a handful instead use `sra-pub-src-1`.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(rhdf5)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+AD_FILE="data/hdf5/K562_essential_raw_singlecell_01.h5ad"
+URL_STR="https://sra-pub-src-2.s3.amazonaws.com/%s/%s_possorted_genome_bam.bam.1"
+
+CSV_RUNS_SHEET="metadata/kd6-essential-runs-sheet-raw.csv"
+CSV_SAMPLE_SHEET="metadata/kd6-essential-sample-sheet.csv"
+CSV_CELL_ANNOTS="metadata/kd6-essential-cell-annots.csv.gz"
+```
+
+## Functions
+
+```{r methods}
+read_ad_df <- function (file, name) {
+    x_attrs <- h5readAttributes(file, name)
+    
+    ## check requested entry is a dataframe
+    ## TODO: do we need to check encoding-version?
+    stopifnot(x_attrs[['encoding-type']] == "dataframe")
+    
+    ## rownames and columns in order
+    idx_cols <- unlist(x_attrs[c("_index", "column-order")], use.names=FALSE)
+    
+    ## load the factor levels
+    x_levels <- h5read(file, str_c(name, "/__categories"))
+    
+    ## load dataframe
+    h5read(file, name)[idx_cols] %>% as_tibble() %>%
+        ## replace categorical columns with proper factors
+        mutate(across(any_of(names(x_levels)), ~ factor(x_levels[[cur_column()]][.x+1L])))
+}
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_cells <- read_ad_df(AD_FILE, '/obs')
+df_runs <- read_csv("metadata/kd6-essential-run-table.csv", col_select=c("Run", "Library Name"))
+df_samples <- read_csv("metadata/KD6_raw_files.csv", col_select=1:26)
+```
+
+## Preprocessing
+```{r prepare_data}
+
+df_runs %<>% rename(srr=Run, run_id=`Library Name`)
+
+df_runs_clean <- df_runs %>% 
+    filter(str_detect(run_id, "^KD6_[0-9]{1,2}_essential$")) %>%
+    mutate(gem_group=as.integer(str_match(run_id, "KD6_([0-9]+)_")[,2])) %>%
+    mutate(sample_id=sprintf("KD6_%02d_essential", gem_group),
+           url=sprintf(URL_STR, srr, run_id))
+
+## NOTE: Thought I might need to process from the FASTQs, but the BAMs are
+## simpler to work with.
+## 
+# df_samples %<>% 
+#     pivot_longer(cols=-c(1,2), names_to="cidx", values_to="fastq") %>%
+#     mutate(run_id=str_extract(fastq, "^.*L[0-9]{3}")) %>%
+#     left_join(df_runs, by="run_id") %>%
+#     distinct(library, run_id, gemgroup, srr) %>%
+#     filter(str_detect(run_id, "mRNA")) %>%
+#     rename(sample_id=library)
+# 
+# df_run_sheet <- df_samples %>%
+#     select(run_id, srr)
+
+df_cells_clean <- df_cells %>%
+    rename(bx=cell_barcode, target_gene=gene, target_gene_id=gene_id) %>%
+    mutate(bx=str_extract(bx, "^[ACGT]{16}"),
+           sample_id=sprintf("KD6_%02d_essential", gem_group),
+           cell_id=str_c(sample_id, "_", bx)) %>%
+    select(cell_id, sample_id, everything()) %>% select(-c("bx")) %>%
+    mutate(across(everything(), as.vector))
+```
+
+# Exports
+```{r export}
+df_runs_clean %>%
+    select(sample_id,url) %>%
+    rename(run_id=sample_id) %>%
+    arrange(run_id) %>%
+    write_csv(CSV_RUNS_SHEET)
+
+df_runs_clean %>%
+    select(sample_id) %>%
+    mutate(file_type="bam",
+           files=sprintf("input/gwps/bam/%s.bam", sample_id)) %>%
+    arrange(sample_id) %>%
+    write_csv(CSV_SAMPLE_SHEET)
+    
+df_cells_clean %>%
+    write_csv(CSV_CELL_ANNOTS)
+```
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```
