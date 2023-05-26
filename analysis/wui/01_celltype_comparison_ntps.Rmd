@@ -1,0 +1,211 @@
+---
+title: "Compare Baseline Experiments"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We compare TPM and WUI values in the non-targeting cells across each of the three
+screens. We expect that the two K562 experiments should be quite similar, whereas 
+the Rpe1 cells should have some differentially expressed genes and possibly use some
+longer isoforms consistent with our experience with primary epithelial cell types.
+However, we have never looked at Rpe1 cells previously, so not a strong prior.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(Hmisc)
+library(cowplot)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+WUI_KD6="tbl/df_wui_kd6_essential_ui10.Rds"
+WUI_RD7="tbl/df_wui_rd7_essential_ui10.Rds"
+WUI_KD8="tbl/df_wui_kd8_gwps_ui10.Rds"
+```
+
+## Functions
+
+```{r methods}
+summarize_by_genes <- function (df) { 
+    df %>%
+        group_by(gene_id, gene_name) %>%
+        dplyr::summarize(tpm_mean=wtd.mean(tpm, n_cells),
+                         tpm_sd=sqrt(wtd.var(tpm, n_cells)),
+                         tpm_q025=wtd.quantile(tpm, n_cells, 0.025),
+                         tpm_q250=wtd.quantile(tpm, n_cells, 0.25),
+                         tpm_q500=wtd.quantile(tpm, n_cells, 0.5),
+                         tpm_q750=wtd.quantile(tpm, n_cells, 0.75),
+                         tpm_q975=wtd.quantile(tpm, n_cells, 0.975),
+                         wui_mean=wtd.mean(wui, n_cells),
+                         wui_sd=sqrt(wtd.var(wui, n_cells)),
+                         wui_q025=wtd.quantile(wui, n_cells, 0.025),
+                         wui_q250=wtd.quantile(wui, n_cells, 0.25),
+                         wui_q500=wtd.quantile(wui, n_cells, 0.5),
+                         wui_q750=wtd.quantile(wui, n_cells, 0.75),
+                         wui_q975=wtd.quantile(wui, n_cells, 0.975),
+                         .groups='drop')
+}
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_wui_kd6 <- read_rds(WUI_KD6) %>% filter(target_gene == "non-targeting", !is.na(wui))
+df_wui_rd7 <- read_rds(WUI_RD7) %>% filter(target_gene == "non-targeting", !is.na(wui))
+df_wui_kd8 <- read_rds(WUI_KD8) %>% filter(target_gene == "non-targeting", !is.na(wui))
+```
+
+## Preprocessing
+```{r prepare_data}
+df_stats_kd6 <- df_wui_kd6 %>% summarize_by_genes
+df_stats_rd7 <- df_wui_rd7 %>% summarize_by_genes
+df_stats_kd8 <- df_wui_kd8 %>% summarize_by_genes
+
+df_kd6_rd7 <- inner_join(df_stats_kd6, df_stats_rd7, 
+                         by=c("gene_id", "gene_name"), 
+                         suffix=c("_kd6", "_rd7"))
+
+df_kd6_kd8 <- inner_join(df_stats_kd6, df_stats_kd8, 
+                         by=c("gene_id", "gene_name"), 
+                         suffix=c("_kd6", "_kd8"))
+
+df_rd7_kd8 <- inner_join(df_stats_kd8, df_stats_rd7, 
+                         by=c("gene_id", "gene_name"), 
+                         suffix=c("_kd8", "_rd7"))
+```
+
+# Analysis
+
+## KD6 vs KD8
+### TPM
+```{r plt_tpm_kd6_kd8, fig.width=5, fig.height=5}
+df_kd6_kd8 %>%
+    ggplot(aes(x=tpm_mean_kd6, y=tpm_mean_kd8)) +
+    geom_errorbar(aes(ymin=tpm_q250_kd8, ymax=tpm_q750_kd8), size=0.1, alpha=0.3, color='red') +
+    geom_errorbarh(aes(xmin=tpm_q250_kd6, xmax=tpm_q750_kd6), size=0.1, alpha=0.3, color='blue') +
+    geom_abline(linetype='dashed') +
+    geom_point(size=0.1) +
+    scale_x_log10() + scale_y_log10() +
+    labs(x="TPM [K562 Essential]", y="TPM [K562 Genome-Wide]") +
+    theme_bw()
+```
+
+### WUI
+```{r plt_kd6_kd8, fig.width=5, fig.height=5}
+df_kd6_kd8 %>%
+    filter(tpm_mean_kd8 >= 5, tpm_mean_kd6 >= 5) %>%
+    ggplot(aes(x=wui_mean_kd6, y=wui_mean_kd8)) +
+    geom_point(size=0.1) +
+    geom_errorbar(aes(ymin=wui_q250_kd8, ymax=wui_q750_kd8), size=0.1, alpha=0.3, color='red') +
+    geom_errorbarh(aes(xmin=wui_q250_kd6, xmax=wui_q750_kd6), size=0.1, alpha=0.3, color='blue') +
+    geom_abline(linetype='dashed') +
+    xlim(0,1) + ylim(0,1) +
+    labs(x="WUI [K562 Essential]", y="WUI [K562 Genome-Wide]") +
+    theme_bw()
+```
+
+## KD6 vs RD7
+### TPM
+```{r plt_tpm_kd6_rd7, fig.width=5, fig.height=5}
+df_kd6_rd7 %>%
+    ggplot(aes(x=tpm_mean_kd6, y=tpm_mean_rd7)) +
+    geom_errorbar(aes(ymin=tpm_q250_rd7, ymax=tpm_q750_rd7), size=0.1, alpha=0.3, color='red') +
+    geom_errorbarh(aes(xmin=tpm_q250_kd6, xmax=tpm_q750_kd6), size=0.1, alpha=0.3, color='blue') +
+    geom_abline(linetype='dashed') +
+    geom_point(size=0.1) +
+    scale_x_log10() + scale_y_log10() +
+    labs(x="TPM [K562 Essential]", y="TPM [Rpe1 Essential]") +
+    theme_bw()
+```
+
+### WUI
+```{r plt_wui_kd6_rd7, fig.width=5, fig.height=5}
+df_kd6_rd7 %>%
+    filter(tpm_mean_kd6 >= 5, tpm_mean_rd7 >= 5) %>%
+    ggplot(aes(x=wui_mean_kd6, y=wui_mean_rd7)) +
+    geom_point(size=0.1) +
+    geom_errorbar(aes(ymin=wui_q250_rd7, ymax=wui_q750_rd7), size=0.1, alpha=0.3, color='red') +
+    geom_errorbarh(aes(xmin=wui_q250_kd6, xmax=wui_q750_kd6), size=0.1, alpha=0.3, color='blue') +
+    geom_abline(linetype='dashed') +
+    xlim(0,1) + ylim(0,1) +
+    labs(x="WUI [K562 Essential]", y="WUI [Rpe1 Essential]") +
+    theme_bw()
+```
+
+## KD8 vs RD7
+
+### TPM
+```{r plt_tpm_kd8_rd7, fig.width=5, fig.height=5}
+df_rd7_kd8 %>%
+    ggplot(aes(x=tpm_mean_kd8, y=tpm_mean_rd7)) +
+    geom_errorbar(aes(ymin=tpm_q250_rd7, ymax=tpm_q750_rd7), size=0.1, alpha=0.3, color='red') +
+    geom_errorbarh(aes(xmin=tpm_q250_kd8, xmax=tpm_q750_kd8), size=0.1, alpha=0.3, color='blue') +
+    geom_abline(linetype='dashed') +
+    geom_point(size=0.1) +
+    scale_x_log10() + scale_y_log10() +
+    labs(x="TPM [K562 Genome-Wide]", y="TPM [Rpe1 Essential]") +
+    theme_bw()
+```
+
+### WUI
+```{r plt_wui_kd8_rd7, fig.width=5, fig.height=5}
+df_rd7_kd8 %>%
+    filter(tpm_mean_kd8 >= 5, tpm_mean_rd7 >= 5) %>%
+    ggplot(aes(x=wui_mean_kd8, y=wui_mean_rd7)) +
+    geom_point(size=0.1) +
+    geom_errorbar(aes(ymin=wui_q250_rd7, ymax=wui_q750_rd7), size=0.1, alpha=0.3, color='red') +
+    geom_errorbarh(aes(xmin=wui_q250_kd8, xmax=wui_q750_kd8), size=0.1, alpha=0.3, color='blue') +
+    geom_abline(linetype='dashed') +
+    xlim(0,1) + ylim(0,1) +
+    labs(x="WUI [K562 Genome-Wide]", y="WUI [Rpe1 Essential]") +
+    theme_bw()
+```
+
+# Conclusion
+
+The non-targeting perturbations in the K562 essential and genome-wide screens are 
+highly consistent, both in gene and isoform abundance. While there are a handful of
+genes with strong WUI changes, it is possible this is an artifact of *de novo* definitions
+of WUI on a per dataset basis. That is, these genes may include different sets of 
+isoforms for these genes, dependending on technical sampling variance, and so the 
+resulting WUI values show a strong shift. E.g., a gene at (0.725, 0.500) might have three
+isoforms in the first definition [0.10, 0.45, 0.45] and only two in the second [0.5, 0.5].
+
+Comparing the Rpe1 cells, shows a distinct set of genes uniquely expressed in the 
+Rpe1 cells (left side of TPM plot). While there is less consistency in the WUI values, 
+there does not appear to be any global shift in a particular direction.
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

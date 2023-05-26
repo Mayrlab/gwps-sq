@@ -1,0 +1,205 @@
+---
+title: "Filter RD7 Essential scUTRquant Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Counts from scUTRquant include all cells passing the UMI threshold. We will filter
+to only those cells annotated in the published data.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(SingleCellExperiment)
+library(tidyverse)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+FILE_SCE_TX="data/sce/rd7_essential.txs.Rds"
+#FILE_SCE_GENE="data/sce/rd7_essential.genes.Rds"
+CSV_CELL_ANNOTS="metadata/rd7-essential-cell-annots.csv.gz"
+
+OUT_SCE_TX="data/sce/rd7_essential.annot.txs.Rds"
+#OUT_SCE_GENE="data/sce/rd7_essential.annot.genes.Rds"
+```
+
+
+# Data
+## Transcripts
+```{r load_txs, message=FALSE}
+sce_txs <- readRDS(FILE_SCE_TX)
+
+## cell annots
+df_cells <- read_csv(CSV_CELL_ANNOTS)
+
+bxs_annots <- mutate(df_cells, bx=str_extract(cell_id, "[ACGT]{16}$")) %>%
+    dplyr::select(sample_id, bx) %>% 
+    group_by(sample_id) %>%
+    summarize(bx=list(bx)) %>%
+    deframe()
+
+bxs_cells <- colData(sce_txs) %>%
+    as_tibble %>%
+    mutate(bx=str_extract(cell_id, "[ACGT]{16}$")) %>%
+    dplyr::rename(sample_id=sample_id.x) %>%
+    group_by(sample_id) %>%
+    summarize(bx=list(bx)) %>%
+    deframe()
+```
+
+# Data Checking
+## Annotated Cells
+We should have ~250K annotated cells.
+
+```{r ct_annotated}
+sum(!is.na(sce_txs$gem_group))
+```
+
+This looks like something is wrong in the annotation.
+
+## Barcode Overlap Fractions
+For each sample in the annotation and in the cells, count the fraction of annotated
+barcodes that are detected among the cells. It should be that, e.g., `RD7_01` should
+have highest fraction with the `RD7_01` sample.
+
+We will plot this and expect a diagonal matrix.
+
+```{r frac_bx, fig.width=5, fig.height=5}
+samples_annots = names(bxs_annots)
+samples_cells = names(bxs_cells)
+bx_frac <- matrix(nrow=length(samples_annots), ncol=length(samples_cells), 
+                  dimnames=list(sample_annots=samples_annots,
+                                sample_cells=samples_cells))
+
+for (i in samples_annots) {
+    for (j in samples_cells) {
+        bx_frac[i,j] <- mean(bxs_annots[[i]] %in% bxs_cells[[j]])
+    }
+}
+
+heatmap(bx_frac[seq(56,1),], Rowv=NA, Colv=NA)
+```
+
+This indicates that the sample names given to the BAMs do not match those used in 
+the annotation table. This could be a mistake in our data processing. For now, since
+the samples appear to match one-to-one, we can try mapping the names and check if 
+the downstream analysis passes some positive controls (e.g., knock-down of target 
+gene expression).
+
+# Repair Cell Annotations
+```{r create_cell_id_map}
+df_sample_map <- which(bx_frac > 0.99, arr.ind=TRUE, useNames=TRUE) %>%
+    as_tibble() %>%
+    mutate(across(everything(), ~ sprintf("RD7_%02d", .x))) %>%
+    dplyr::rename(sample_id=sample_annots, sample_id_old=sample_cells)
+
+map_cell_id <- colData(sce_txs) %>%
+    as_tibble() %>%
+    dplyr::select(cell_id, sample_id.x) %>%
+    dplyr::rename(sample_id_old=sample_id.x, cell_id_old=cell_id) %>%
+    left_join(df_sample_map, by="sample_id_old") %>%
+    mutate(bx=str_extract(cell_id_old, "[ACGT]{16}$"),
+           cell_id=str_c(sample_id, bx, sep="_")) %>%
+    dplyr::select(cell_id_old, cell_id) %>%
+    deframe()
+```
+
+
+Are all names cell_ids mappable? `r all(names(map_cell_id) %in% colnames(sce_txs))`
+
+How many cells would then be annotated? `r sum(df_cells$cell_id %in% map_cell_id)`
+
+These look good, so we apply this mapping.
+
+```{r map_cell_ids}
+colnames(sce_txs) %<>% { map_cell_id[.] }
+sce_txs %<>% `[`(,colnames(sce_txs) %in% df_cells$cell_id)
+
+
+colData(sce_txs) <- df_cells %>% 
+    DataFrame(row.names=.$cell_id) %>%
+    `[`(colnames(sce_txs),)
+
+gc()
+```
+
+## Check UMI Counts
+For sanity check, we can compare the total UMI counts from the cell data with that 
+found in the annotations. We expect a diagonal; complete failure would look like 
+a random distribution.
+
+```{r plt_umi_cts, fig.width=4, fig.height=4}
+colData(sce_txs) %>% 
+    as_tibble() %>%
+    mutate(umi_count_sq=colSums(counts(sce_txs))) %>%
+    ggplot(aes(x=UMI_count, y=umi_count_sq)) +
+    geom_point(size=0.1, alpha=0.2) +
+    geom_abline(linetype='dashed', color='magenta') +
+    scale_x_log10(limits=c(1e3,2e5)) + scale_y_log10(limits=c(1e3,2e5)) +
+    labs(x="UMIs per cell [Published]", y="UMIs per cell [sqUTRquant]") +
+    theme_bw()
+```
+
+While it looks like we have undercounting, the trend of the data appears consistent
+with the cells having the correct annotation.
+
+### Export
+```{r export_txs}
+saveRDS(sce_txs, OUT_SCE_TX)
+```
+
+
+<!-- ### Clean Up -->
+<!-- ```{r clean_up} -->
+<!-- rm(idx_cells, sce_txs) -->
+<!-- gc() -->
+<!-- ``` -->
+
+<!-- ## Genes -->
+<!-- ```{r load_genes, message=FALSE} -->
+<!-- sce_genes <- readRDS(FILE_SCE_GENE) -->
+
+<!-- idx_cells <- !is.na(sce_genes$gem_group) -->
+<!-- sce_genes %<>% `[`(, idx_cells) -->
+
+<!-- gc() -->
+<!-- ``` -->
+
+<!-- ### Export -->
+<!-- ```{r export_genes} -->
+<!-- saveRDS(sce_genes, OUT_SCE_GENE) -->
+<!-- ``` -->
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

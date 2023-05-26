@@ -1,0 +1,19 @@
+﻿cluster_id_target,clus_name,n_targets,order_heatm,order_heatm_new,clus_name,n_targets
+14,CFIm complex,6,1,1,mRNA alternative cleavage and polyadenylation,6
+11,mRNA export,21,3,2,mRNA transport,21
+13,Proteasome,39,5,3,Proteasome,39
+9,Mitotic cell cycle,75,6,4,Mitotic cell cycle,75
+16,Chromatin organization,19,4,5,Chromatin organization,19
+18,CCT complex,8,2,6,Chaperonin-containing t-complex,8
+15,Ribosome I,11,10,7,Ribosome,202
+2,Ribosome II,41,8,8,Ribosome,202
+12,Ribosome biogenesis,52,7,9,Ribosome,202
+5,Translation initiation,98,9,10,Ribosome,202
+1,mRNA splicing I,26,11,11,Splicing,117
+6,mRNA splicing II,91,12,12,Splicing,117
+8,Transcription regulation I,39,13,13,"Transcription initiation and elongation, CTD phosphorylation",39
+3,tRNA synthesis,132,14,14,tRNA activation,132
+7,"DNA replication, repair",130,15,15,Transcription,160
+4,Transcription regulation II,30,16,16,Transcription,160
+10,"CPSF, CSTF and PAF complex",10,17,17,mRNA 3' end processing,10
+17,Nuclear exosome ,8,18,18,Nuclear exosome complex,8

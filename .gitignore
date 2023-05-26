@@ -4,3 +4,9 @@ scratch/
 *lilac*
 *xbio*
 .mirv/
+igv/
+*.html
+data/
+img/
+tbl/
+metadata/*.gz
