@@ -1,0 +1,298 @@
+---
+title: "Initial QC on RD7 Essential Data - Multi-UTR Genes"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Here we perform a second pass look at the data, similar to the first pass, but
+focusing specifically on multi-UTR genes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(plotly)
+library(ggbeeswarm)
+library(Matrix)
+library(matrixStats)
+library(SingleCellExperiment)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+FILE_SCE_TX="data/sce/rd7_essential.annot.txs.Rds"
+
+## KNOWN FACTORS
+GENES_CPSF <- c("CPSF1", "CPSF2", "CPSF3", "CPSF4", "WDR33", "FIP1L1")
+GENES_CF1 <- c("NUDT21", "CPSF6", "CPSF7")
+GENES_CF2 <- c("PCF11", "CLP1")
+GENES_CSTF <- c("CSTF1", "CSTF2", "CSTF2T", "CSTF3")
+GENES_PAF <- c("PAF1", "CTR9", "RTF1")
+GENES_NEF <- c("NXF1", "THOC1", "THOC2", "THOC3", "THOC5", "THOC6", "THOC7")
+GENES_SPL <- str_c("SRSF", 1:11)
+GENES_MTOR <- c("MTOR", "RPTOR", "MLST8", "CLK2", "AKT1")
+
+COLOR_MAP <- c("non-targeting"="grey",
+               "CPSF complex"="red4",
+               "CFI complex"="purple2",
+               "CFII complex"="orange2",
+               "CSTF complex"="peachpuff",
+               "PAF complex"="steelblue",
+               "mRNA export factors"="orchid2",
+               "splicing factors"="seagreen1",
+               "MTOR complex"="cyan",
+               "other"="black")
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+sce <- readRDS(FILE_SCE_TX) %>% `[`(rowData(.)$utr_type_raw == 'multi',)
+```
+
+## Preprocessing
+Among our statistics, we will compute the percentage of UMIs corresponding to specific
+isoform classes, including IPA, proximal, and distal, in multi-UTR genes.
+
+```{r prepare_data}
+df_cells <- colData(sce) %>% as_tibble %>%
+    mutate(umis_total=colSums(counts(sce)),
+           pct_ipa=colSums(counts(sce[rowData(sce)$is_ipa,]))/umis_total,
+           pct_proximal=colSums(counts(sce[rowData(sce)$is_proximal,]))/umis_total,
+           pct_distal=colSums(counts(sce[rowData(sce)$is_distal,]))/umis_total)
+```
+
+# Target Analysis
+We will explore whether any perturbations have effects on basic transcriptome characteristics.
+These will also be compared against each other.
+
+```{r compute_target_stats}
+df_targets <- df_cells %>%
+    group_by(target_gene, target_gene_id, sgID_AB) %>%
+    summarize(n_cells=dplyr::n(),
+              mean_umis_total=mean(umis_total),
+              pct_ipa=weighted.mean(pct_ipa, umis_total),
+              pct_proximal=weighted.mean(pct_proximal, umis_total),
+              pct_distal=weighted.mean(pct_distal, umis_total), .groups='drop') %>%
+    mutate(gene_set=case_when(
+        target_gene == "non-targeting" ~ "non-targeting",
+        target_gene %in% GENES_CPSF ~ "CPSF complex",
+        target_gene %in% GENES_CF1 ~ "CFI complex",
+        target_gene %in% GENES_CF2 ~ "CFII complex",
+        target_gene %in% GENES_CSTF ~ "CSTF complex",
+        target_gene %in% GENES_PAF ~ "PAF complex",
+        target_gene %in% GENES_NEF ~ "mRNA export factors",
+        target_gene %in% GENES_SPL ~ "splicing factors",
+        target_gene %in% GENES_MTOR ~ "MTOR complex",
+        TRUE ~ "other"
+    ) %>% factor(levels=c("other", "non-targeting", "CPSF complex", 
+                          "CFI complex", "CFII complex", "CSTF complex",
+                          "PAF complex", "mRNA export factors",
+                          "splicing factors", "MTOR complex"))) %>%
+    mutate(is_known=!gene_set %in% c("non-targeting", "other"))
+```
+
+
+### IPA Extremes
+```{r ipa_min_max}
+df_targets %>%
+    select(target_gene, n_cells, pct_ipa, mean_umis_total, sgID_AB) %>%
+    slice_max(pct_ipa, n=20)
+
+df_targets %>%
+    select(target_gene, n_cells, pct_ipa, mean_umis_total, sgID_AB) %>%
+    slice_min(pct_ipa, n=20)
+```
+
+### Proximal Extemes
+```{r proximal_min_max}
+df_targets %>%
+    select(target_gene, n_cells, pct_proximal, mean_umis_total, sgID_AB) %>%
+    slice_max(pct_proximal, n=20)
+
+df_targets %>%
+    select(target_gene, n_cells, pct_proximal, mean_umis_total, sgID_AB) %>%
+    slice_min(pct_proximal, n=20)
+```
+
+### Distal Extremes
+```{r distal_min_max}
+df_targets %>%
+    select(target_gene, n_cells, pct_distal, mean_umis_total, sgID_AB) %>%
+    slice_max(pct_distal, n=20)
+
+df_targets %>%
+    select(target_gene, n_cells, pct_distal, mean_umis_total, sgID_AB) %>%
+    slice_min(pct_distal, n=20)
+```
+
+## Pair Plots
+### Proximal vs Distal
+```{r plt_pair_pr_ds, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=pct_proximal, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from proximal isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+    
+ggplotly(g, tooltip=c("text", "x", "y", "gene_set", "n_cells"))
+```
+
+```{r plt_pair_pr_ds_static, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=pct_proximal, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    labs(x="Percent UMIs from proximal isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+```
+
+Similar to the first pass, we observed three extreme outliers that have isoform switching
+effects: **CPSF6**, **NUDT21**, and **OGFOD1**. In the same direction - shortening when 
+knocked down - we see **CNOT1** and **PABPC1**, but with milder effect sizes.
+In the opposite direction - lengthening when knocked-down - we see **PCF11**, **SRSF7**,
+**FIP1L1**, and **NPAT**.
+
+Other factors appear to impact the isoforms almost independently. Namely, knockdown 
+of **TAF** genes have a strong increase in distal isoforms.  Similarly, core factors,
+such as, **CPSF1-4**, **CSTF1**, and **CSTF3**.
+
+The **PAF1 complex** members form an outlier set that reduces proximial isoform usage 
+with little impact on distal usage, such as, **RTF1**, **PAF1**, and **CTF9**.
+
+### IPA vs Proximal
+```{r plt_pair_ipa_pr, fig.width=6, fig.height=6}
+g <- df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_proximal, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from proximal isoforms",
+         color="Gene Set")
+    
+ggplotly(g, tooltip=c("text", "x", "y", "gene_set", "n_cells"))
+```
+
+
+```{r plt_pair_ipa_pr_static, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_proximal, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from proximal isoforms",
+         color="Gene Set")
+```
+
+Again, the isoform switchers from above are extreme outliers. Here we see that 
+knockdown of **PAF1 complex** members reduces proximal usage in favor of increased
+IPA usage. 
+
+### IPA vs Distal
+```{r plt_pair_ipa_ds, fig.width=6, fig.height=6}
+g <- df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+    
+ggplotly(g, tooltip=c("text", "x", "y", "gene_set", "n_cells"))
+```
+
+
+```{r plt_pair_ipa_ds_static, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+```
+
+Here we observe the factors whose knockdown increased distal usage independent of
+proximal usage do so at the cost of decreased IPA usage. These were the **TAF** members,
+**CPSF1-4**, and **CSTF3**. Notably, **CPSF3** does not appear to impact
+IPA.
+
+# Conclusion
+
+Considering on multi-UTR genes provides a cleaner signal for effects on different
+isoforms. We now see many of the known factors stand out, and can identify other
+possible genes with isoform-specific effects.
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

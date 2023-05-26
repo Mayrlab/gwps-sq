@@ -1,0 +1,145 @@
+---
+title: "RAC1 Isoform in Specific Targets"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Exploring visualization of isoform-level expression across perturbations.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(Matrix)
+library(matrixStats)
+library(SingleCellExperiment)
+library(Gviz)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(plyranges)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+options(ucscChromosomeNames=FALSE)
+BIN_WIDTH=50
+
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+FILE_SE="data/se/kd6_essential_bulk_expressed.Rds"
+FILE_GTF="../hcl/data/gff/utrome.e30.t5.gc39.pas3.f0.9999.w500.gtf.gz"
+```
+
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+se <- readRDS(FILE_SE)
+gr <- read_gff(FILE_GTF, genome_info='hg38') %>%
+    filter(type == 'transcript') %>%
+    anchor_3p() %>%
+    mutate(width=BIN_WIDTH)
+
+tr_genome <- GenomeAxisTrack(v=10)
+```
+
+## Preprocessing
+```{r prepare_data}
+gene2txs <- rowData(se) %>% 
+    as_tibble %>% 
+    dplyr::select(gene_name, transcript_id) %>%
+    group_by(gene_name) %>%
+    summarize(txs=list(transcript_id)) %>%
+    deframe()
+
+tpm_tx_target <- assay(se, "counts") %>% { 
+    idx_ntp <- str_detect(colnames(.), "non-targeting")
+    cts_ntp <- rowSums(.[,idx_ntp])
+    cts_tx_target <- .[, !idx_ntp]
+    cbind(cts_tx_target, "ntp"=cts_ntp)
+} %>%
+    { . %*% Diagonal(ncol(.), 1e6/colSums(.)) }
+```
+
+## Functions
+```{r methods}
+get_gene_gr <- function (gene) {
+    filter(gr, transcript_id %in% gene2txs[[gene]])
+}
+
+get_counts_gr <- function (gene, target) {
+    get_gene_gr(gene) %>%
+        mutate(score=tpm_tx_target[transcript_id, target]) %>%
+        select(score)
+}
+
+get_gene_tr <- function (gene, chr, start, end) {
+    GeneRegionTrack(txdb, chromosome=chr, start=start, end=end, symbol=gene,
+                    showId=TRUE, name=gene, geneSymbol=TRUE)
+}
+
+get_tpm_tr <- function (gene, target_symbol) {
+    target <- colnames(se) %>% {.[str_detect(., target_symbol)]}
+    DataTrack(get_counts_gr(gene, target), name=target_symbol, genome="hg38",
+                    type="hist", width=50)
+}
+```
+
+
+# Analysis
+
+## Gene Plot
+
+```{r plt_rac1, fig.width=4, fig.height=4}
+GENE="RAC1"
+CHR="chr7"
+START=6402183
+END=6404081
+
+tr_gene <- get_gene_tr("RAC1", CHR, START, END)
+
+tr_ntp <- DataTrack(get_counts_gr(GENE, "ntp"), name="Non-Targeting", genome="hg38",
+                    type="hist", width=BIN_WIDTH)
+
+tr_nudt21 <- get_tpm_tr(GENE, "NUDT21")
+tr_fip1l1 <- get_tpm_tr(GENE, "FIP1L1")
+
+plotTracks(list(tr_nudt21, tr_fip1l1, tr_ntp, tr_gene, tr_genome),
+           sizes=c(4,4,4,2,2),
+           from=START, to=END, 
+           fontcolor='black')
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

@@ -1,0 +1,394 @@
+---
+title: "Compute WUIs - KD8 GWPS"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Using the bulk summarized GWPS data object, compute the WUI for each mulit-UTR gene
+in each perturbation. Additionally, compute average WUI for each perturbation and 
+analyze for outliers.
+
+Note that WUI can only be computed for detected genes. Targets with low cell 
+recovery tend to recover fewer genes and will rely on higher expression genes. If 
+these have a different WUI profile than lower expression genes, there could be 
+a bias in the average WUI computed for the target. Currently, we do not attempt
+to model this.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(ggbeeswarm)
+library(SummarizedExperiment)
+library(Matrix)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+MIN_UMIS=5000
+FILE_SE="data/se/kd8_gwps_bulk_expressed.Rds"
+
+FILE_OUT="tbl/kd8_gwps_wui.xlsx"
+DIR_IMG_OUT="img/kd8-gwps-"
+
+## KNOWN FACTORS
+GENES_CPSF <- c("CPSF1", "CPSF2", "CPSF3", "CPSF4", "WDR33", "FIP1L1")
+GENES_CF1 <- c("NUDT21", "CPSF6", "CPSF7")
+GENES_CF2 <- c("PCF11", "CLP1")
+GENES_CSTF <- c("CSTF1", "CSTF2", "CSTF2T", "CSTF3")
+GENES_PAF <- c("PAF1", "CTR9", "RTF1")
+GENES_NEF <- c("NXF1", "SRSF3", "SRSF7", "THOC5")
+
+COLOR_MAP <- c("non-targeting"="grey",
+               "CPSF complex"="#8FD979",
+               "CFI complex"="purple",
+               "CFII complex"="#FFAA66",
+               "CSTF complex"="#F6CDA3",
+               "PAF complex"="steelblue",
+               "mRNA export factors"="magenta",
+               "other"="black")
+```
+
+
+## Helper Functions
+```{r functions}
+compute_effective_count <- function (cts) {
+  pct <- (cts %*% Diagonal(ncol(cts), 1/colSums(cts)))
+  lpct <- pct
+  lpct@x <- log2(lpct@x)
+  2^(-colSums(pct*lpct))
+}
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+se_tx_target <- readRDS("data/se/kd8_gwps_bulk_expressed.Rds")
+```
+
+## Preprocessing
+
+```{r prepare_data}
+df_multi <- rowData(se_tx_target) %>% as_tibble %>%
+    filter(utr_type_raw == 'multi') %>%
+    filter(rowSums(assay(se_tx_target[transcript_id,], "counts")) >= MIN_UMIS) %>%
+    mutate(ensembl_id=str_remove(gene_id, "\\.[0-9]+$")) %>%
+    group_by(ensembl_id) %>%
+    filter(dplyr::n() > 1) %>%
+    mutate(utr_rank_expr=rank(utr_rank),
+           utr_wt=(utr_rank_expr - 1)/(max(utr_rank_expr) - 1)) %>%
+    ungroup() %>%
+    dplyr::select(transcript_id, transcript_name, gene_id, gene_name, ensembl_id, 
+           utr_rank, utr_rank_expr, utr_wt) %>%
+    arrange(gene_id, utr_rank)
+
+idx_tx <- df_multi$transcript_id
+
+df_multi %>% distinct(ensembl_id) %>% nrow %>% 
+    sprintf(fmt="Found %d targeted multi-UTR genes.")
+
+df_multi %>% nrow %>% 
+    sprintf(fmt="These consist of %d 3' UTR isoforms.")
+```
+
+
+# Compute WUIs
+```{r compute_wuis}
+wt_tx <- df_multi %>% dplyr::select(transcript_id, utr_wt) %>% deframe
+
+M_gene_tx <- df_multi$ensembl_id %>% fac2sparse
+
+cts_tx_target <- assay(se_tx_target[idx_tx,], "counts")
+
+cts_gene_target <- M_gene_tx %*% cts_tx_target
+
+ui_tx_target <- cts_tx_target / (t(M_gene_tx) %*% cts_gene_target)
+#ui_tx_target[is.na(ui_tx_target)] <- 0
+
+wui_gene_target <- M_gene_tx %*% Diagonal(length(wt_tx), wt_tx) %*% ui_tx_target
+```
+
+# Compute Effective Transcripts
+```{r compute_effective_txs}
+etx_target_all <- assay(se_tx_target, "counts") %>% compute_effective_count
+etx_target_multi <- cts_tx_target %>% compute_effective_count
+```
+
+# Target Analysis
+
+```{r summarize_to_targets}
+df_targets <- colData(se_tx_target) %>% as_tibble %>%
+    mutate(mean_wui=colMeans(wui_gene_target[,sgID_AB], na.rm=TRUE),
+           etx_all=etx_target_all[sgID_AB],
+           etx_multi=etx_target_multi[sgID_AB],
+           n_genes_detected=colSums(!is.na(wui_gene_target[,sgID_AB]))) %>%
+    mutate(gene_set=case_when(
+        target_gene == "non-targeting" ~ "non-targeting",
+        target_gene %in% GENES_CPSF ~ "CPSF complex",
+        target_gene %in% GENES_CF1 ~ "CFI complex",
+        target_gene %in% GENES_CF2 ~ "CFII complex",
+        target_gene %in% GENES_CSTF ~ "CSTF complex",
+        target_gene %in% GENES_PAF ~ "PAF complex",
+        target_gene %in% GENES_NEF ~ "mRNA export factors",
+        TRUE ~ "other"
+    ) %>% factor(levels=c("other", "non-targeting", "CPSF complex", 
+                          "CFI complex", "CFII complex", "CSTF complex",
+                          "PAF complex", "mRNA export factors"))) %>%
+    mutate(is_known=!gene_set %in% c("non-targeting", "other"))
+```
+
+# Export
+```{r export_tbl}
+writexl::write_xlsx(df_targets, FILE_OUT)
+```
+
+## Plots
+### WUI - All Targets
+```{r plot_awui_all, fig.width=6, fig.height=6}
+g <- df_targets %>%
+    ggplot(aes(x="Perturbations", y=mean_wui)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=gene_set, size=n_cells, text=target_gene), pch=16) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Mean WUI", color="Gene Set", size=NULL)
+
+ggplotly(g, tooltip=c("text", "y", "gene_set", "n_cells"))
+```
+
+
+### WUI vs Effective Transcripts (All Genes)
+```{r plt_pair_wui_etx_all, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=mean_wui, y=etx_all, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Mean Weighted Usage Index",
+         y="Effective Transcripts (All Genes)",
+         color="Gene Set")
+
+ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_wui_etx_all, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=mean_wui, y=etx_all, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x="Mean Weighted Usage Index",
+         y="Effective Transcripts (All Genes)",
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "wui_etx_all.pdf"), width=8, height=6, dpi=300)
+```
+
+### WUI vs Effective Transcripts (Multi-UTR Genes)
+```{r plt_pair_wui_etx_multi, fig.width=8, fig.height=8}
+# g <- df_targets %>%
+#     ggplot(aes(x=mean_wui, y=etx_multi, color=gene_set, text=target_gene)) +
+#     geom_point(aes(size=n_cells), pch=16) +
+#     geom_rug(size=0.1) +
+#     scale_color_manual(values=COLOR_MAP) +
+#     scale_size_continuous(range=c(0.05, 3)) +
+#     theme_bw() +
+#     theme(legend.position="none") +
+#     labs(x="Mean Weighted Usage Index",
+#          y="Effective Transcripts (Multi-UTR Genes)",
+#          color="Gene Set")
+# 
+# ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_wui_etx_multi, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=mean_wui, y=etx_multi, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x="Mean Weighted Usage Index",
+         y="Effective Transcripts (Multi-UTR Genes)",
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "wui_etx_multi.pdf"), width=8, height=6, dpi=300)
+```
+
+### Effective Transcripts - All Genes vs Multi-Only
+```{r plt_pair_etx_all_multi, fig.width=8, fig.height=8}
+# g <- df_targets %>%
+#     ggplot(aes(x=etx_all, y=etx_multi, color=gene_set, text=target_gene)) +
+#     geom_point(aes(size=n_cells), pch=16) +
+#     geom_rug(size=0.1) +
+#     scale_color_manual(values=COLOR_MAP) +
+#     scale_size_continuous(range=c(0.05, 3)) +
+#     theme_bw() +
+#     theme(legend.position="none") +
+#     labs(x="Effective Transcripts (All Genes)",
+#          y="Effective Transcripts (Multi-UTR Genes)",
+#          color="Gene Set")
+# 
+# ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_etx_all_multi, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=etx_all, y=etx_multi, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x="Effective Transcripts (All Genes)",
+         y="Effective Transcripts (Multi-UTR Genes)",
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "etx_all_v_multi.pdf"), width=8, height=6, dpi=300)
+```
+
+# Gene Set Enrichment
+```{r}
+awui_baseline <- df_targets %>%
+    filter(target_gene == 'non-targeting') %$%
+    weighted.mean(mean_wui, n_cells)
+
+awui_targets <- df_targets %>% 
+    filter(target_gene != 'non-targeting', n_cells >= 20) %>%
+    group_by(target_gene_id) %>%
+    summarize(mean_wui=weighted.mean(mean_wui, n_cells)) %>%
+    mutate(mwui_dev=mean_wui-awui_baseline) %>%
+    dplyr::select(target_gene_id, mwui_dev) %>% deframe %>% sort(decreasing=TRUE)
+
+gseBP <- gseGO(awui_targets, ont="BP", OrgDb=org.Hs.eg.db, keyType="ENSEMBL", nPermSimple=1e4)
+gseMF <- gseGO(awui_targets, ont="MF", OrgDb=org.Hs.eg.db, keyType="ENSEMBL", nPermSimple=1e4)
+gseCC <- gseGO(awui_targets, ont="CC", OrgDb=org.Hs.eg.db, keyType="ENSEMBL", nPermSimple=1e4)
+```
+
+## Biological Process
+```{r plt_bp_dots, fig.width=8, fig.height=20}
+dotplot(gseBP, showCategory=200, split=".sign") + 
+    facet_grid(.~.sign)
+```
+
+```{r plt_bp_ridges, fig.width=8, fig.height=20}
+ridgeplot(gseBP, showCategory=200) + 
+    labs(x = "Deviation from Baseline AWUI")
+```
+
+```{r plt_bp_network, fig.width=20, fig.height=20}
+emapplot(enrichplot::pairwise_termsim(gseBP), showCategory=Inf)
+```
+
+
+```{r plt_gsea_bp, fig.width=8, fig.height=8}
+df_genesets <- gseBP@result
+
+for (i in seq(nrow(df_genesets))) {
+    gseaplot(gseBP, by='all', geneSetID=i, title=df_genesets[i, "Description"]) %>%
+        print()
+}
+```
+
+## Cellular Component
+```{r plt_cc_dots, fig.width=8, fig.height=20}
+dotplot(gseCC, showCategory=200, split=".sign") + 
+    facet_grid(.~.sign)
+```
+
+```{r plt_cc_ridges, fig.width=8, fig.height=20}
+ridgeplot(gseCC, showCategory=200) + 
+    labs(x = "Deviation from Baseline AWUI")
+```
+
+```{r plt_cc_network, fig.width=20, fig.height=20}
+emapplot(enrichplot::pairwise_termsim(gseCC), showCategory=Inf)
+```
+
+```{r plt_gsea_cc, fig.width=8, fig.height=8}
+df_genesets <- gseCC@result
+
+for (i in seq(nrow(df_genesets))) {
+    gseaplot(gseCC, by='all', geneSetID=i, title=df_genesets[i, "Description"]) %>%
+        print()
+}
+```
+
+## Molecular Function
+```{r plt_mf_dots, fig.width=8, fig.height=20}
+dotplot(gseMF, showCategory=200, split=".sign") + 
+    facet_grid(.~.sign)
+```
+
+```{r plt_mf_ridges, fig.width=8, fig.height=20}
+ridgeplot(gseMF, showCategory=200) + 
+    labs(x = "Deviation from Baseline AWUI")
+```
+
+```{r plt_mf_network, fig.width=20, fig.height=20}
+emapplot(enrichplot::pairwise_termsim(gseMF), showCategory=Inf)
+```
+
+```{r plt_gsea_mf, fig.width=8, fig.height=8}
+df_genesets <- gseMF@result
+
+for (i in seq(nrow(df_genesets))) {
+    gseaplot(gseMF, by='all', geneSetID=i, title=df_genesets[i, "Description"]) %>%
+        print()
+}
+```
+
+# Conclusion
+WUI appears to be sufficient to capture the major transcript-level action we had
+seen previously with contrasting simply proximal and distal transcripts.
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

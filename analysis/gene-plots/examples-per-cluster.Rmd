@@ -1,0 +1,770 @@
+---
+title: "Example Isoform Plots per Target Clusters"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Exploring visualization of isoform-level expression across perturbations.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(Matrix)
+library(matrixStats)
+library(SingleCellExperiment)
+library(Gviz)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(plyranges)
+library(BiocParallel)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+register(MulticoreParam(8))
+
+options(ucscChromosomeNames=FALSE)
+BIN_WIDTH=50
+N_EXAMPLES=3
+N_TOP=50
+
+## filtering options
+## number of cells in perturbation
+MIN_CELLS=30
+## max NTPs with NA WUI
+MAX_NTP_NA=0.20
+## min avg TPM in NTPs
+MIN_MEAN_TPM=20
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+FILE_SE="data/se/kd6_essential_bulk_expressed.Rds"
+FILE_WUI="tbl/df_wui_kd6_essential_ui10.Rds"
+FILE_GTF="../hcl/data/gff/utrome.e30.t5.gc39.pas3.f0.9999.w500.gtf.gz"
+FILE_CLUSTERS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+FILE_GENE_CLUSTERS="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+
+LBL_UTR_CLUSTERS=c(
+    "14"="CFIm complex",
+    "11"="mRNA export",
+    "13"="proteosome",
+    "9"="mitotic cell cycle",
+    "16"="chromatin organization",
+    "18"="chaperonin-containing t-complex",
+    "15"="cytoplasmic translation",
+    "2"="ribosome",
+    "12"="ribosome biogenesis",
+    "5"="translation initiation",
+    "1"="mRNA splicing I",
+    "6"="mRNA splicing II",
+    "8"="transcription initiation",
+    "3"="tRNA activation",
+    "7"="DNA replication and repair",
+    "4"="transcription initiation and elongation",
+    "10"="CPSF, CSTF, and PAF complex",
+    "17"="nuclear exosome complex",
+    "0"="non-targeting"
+)
+```
+
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+se <- readRDS(FILE_SE)
+df_wui <- readRDS(FILE_WUI)
+gr <- read_gff(FILE_GTF, genome_info='hg38') %>%
+    filter(type == 'transcript') %>%
+    anchor_3p() %>%
+    mutate(width=BIN_WIDTH)
+df_clusters <- read_csv(FILE_CLUSTERS)
+df_gene_clusters <- read_csv(FILE_GENE_CLUSTERS, col_types='cci')
+tr_genome <- GenomeAxisTrack(v=10)
+```
+
+## Preprocessing
+```{r prepare_data}
+gene2txs <- rowData(se) %>% 
+    as_tibble %>% 
+    dplyr::select(gene_name, transcript_id) %>%
+    group_by(gene_name) %>%
+    summarize(txs=list(transcript_id)) %>%
+    deframe()
+
+tpm_tx_target <- assay(se, "counts") %>% { 
+    idx_ntp <- str_detect(colnames(.), "non-targeting")
+    cts_ntp <- rowSums(.[,idx_ntp])
+    cts_tx_target <- .[, !idx_ntp]
+    cbind(cts_tx_target, "ntp"=cts_ntp)
+} %>%
+    { . %*% Diagonal(ncol(.), 1e6/colSums(.)) }
+
+M_target_cluster <- df_clusters %>% 
+    # dummy entry for NTPs
+    add_row(sgID_AB="ntp", cluster_id=0) %>%
+    dplyr::select(sgID_AB, cluster_id) %>%
+    deframe %>% fac2sparse %>% t
+
+tpm_tx_cluster <- M_target_cluster %>%
+    { tpm_tx_target[,rownames(.)] %*% . %*% Diagonal(ncol(.), 1/colSums(.)) }
+
+df_ntp <- filter(df_wui, target_gene == 'non-targeting') %>%
+    group_by(gene_id, gene_name) %>%
+    filter(mean(is.na(wui)) <= MAX_NTP_NA) %>%
+    filter(mean(tpm_gene) >= MIN_MEAN_TPM) %>%
+    filter(!is.na(wui)) %>%
+    summarize(mean_wui=weighted.mean(wui, n_cells), .groups='drop',
+              sd_wui=sqrt(sum((wui-mean_wui)^2)/dplyr::n()))
+
+df_dwui <- df_wui %>%
+    filter(target_gene != 'non-targeting',
+           n_cells >= MIN_CELLS) %>%
+    inner_join(df_ntp, by=c("gene_id", "gene_name")) %>%
+    mutate(dwui=wui-mean_wui) %>%
+    dplyr::select(gene_id, gene_name, sgID_AB, tpm_gene, tpm_lu, tpm_su, wui, dwui)
+
+
+df_dwui_avg <- left_join(df_clusters, df_dwui, 
+          by=c("sgID_AB")) %>%
+    group_by(cluster_id, gene_id, gene_name) %>%
+    summarize(mean_tpm_gene=mean(tpm_gene),
+              mean_tpm_su=mean(tpm_su),
+              mean_tpm_lu=mean(tpm_lu),
+              mean_wui=mean(wui),
+              mean_dwui=mean(dwui),
+              .groups='drop')
+
+df_short <- df_dwui_avg %>%
+    group_by(cluster_id) %>%
+    slice_min(mean_dwui, n=N_TOP) %>%
+    slice_sample(n=N_EXAMPLES) %>%
+    ungroup()
+
+
+df_long <- df_dwui_avg %>%
+    group_by(cluster_id) %>%
+    slice_max(mean_dwui, n=N_TOP) %>%
+    slice_sample(n=N_EXAMPLES) %>%
+    ungroup()
+
+df_minchange <- df_dwui_avg %>%
+    group_by(cluster_id) %>%
+    slice_min(abs(mean_dwui), n=N_TOP) %>%
+    slice_sample(n=N_EXAMPLES) %>%
+    ungroup()
+```
+
+## Functions
+```{r methods}
+get_gene_gr <- function (gene) {
+    filter(gr, transcript_id %in% gene2txs[[gene]])
+}
+
+get_counts_gr <- function (gene, cluster) {
+    get_gene_gr(gene) %>%
+        mutate(score=tpm_tx_cluster[transcript_id, cluster]) %>%
+        plyranges::select(score)
+}
+
+get_tpm_tr <- function (gene, cluster) {
+    DataTrack(get_counts_gr(gene, cluster), name=cluster, genome="hg38",
+                    type="hist", width=50)
+}
+
+get_tpm_tr_all <- function (gene) {
+    lapply(names(LBL_UTR_CLUSTERS), get_tpm_tr, gene=gene)
+}
+
+get_gene_tr <- function (gene, chr, start, end) {
+    GeneRegionTrack(txdb, chromosome=chr, start=start, end=end, symbol=gene,
+                    showId=TRUE, name=gene, geneSymbol=TRUE)
+}
+
+harmonize_ylim <- function (trs) {
+    max_score <- max(sapply(trs, function (tr) { max(tr@data) }))
+    ylims <- c(0, max_score*1.05)
+    lapply(trs, function (tr) {
+        displayPars(tr) <- list(ylim=ylims)
+        tr
+    })
+}
+
+plot_cluster <- function (gene, cluster) {
+    gr_gene <- get_gene_gr(gene)
+    chr_gene <- seqnames(gr_gene) %>% as.character %>% `[[`(1)
+    start_gene <- min(start(gr_gene)) - 1e3
+    end_gene <- max(end(gr_gene)) + 1e3
+    
+    tr_gene <- get_gene_tr(gene, chr_gene, start_gene, end_gene)
+
+    tr_cluster <- get_tpm_tr(gene, cluster)
+    tr_ntp <- get_tpm_tr(gene, "0")
+                                 
+    
+    plotTracks(append(harmonize_ylim(list(tr_cluster, tr_ntp)), 
+                      list(tr_gene, tr_genome)),
+               sizes=c(4,4,4,2),
+               from=start_gene, to=end_gene, 
+               col.border.title="white",
+               fontcolor.title='grey20',
+               col.axis="grey20",
+               background.title='grey90')
+}
+
+plot_all_clusters <- function (gene) {
+    gr_gene <- get_gene_gr(gene)
+    chr_gene <- seqnames(gr_gene) %>% as.character %>% `[[`(1)
+    start_gene <- min(start(gr_gene)) - 1e3
+    end_gene <- max(end(gr_gene)) + 1e3
+    
+    tr_gene <- get_gene_tr(gene, chr_gene, start_gene, end_gene)
+
+    trs_clusters <- get_tpm_tr_all(gene)
+    
+    plotTracks(append(harmonize_ylim(trs_clusters), list(tr_gene, tr_genome)),
+               #sizes=c(4,4,4,4,2),
+               from=start_gene, to=end_gene, 
+               col.border.title="white",
+               fontcolor.title='grey20',
+               col.axis="grey20",
+               background.title='grey90')
+}
+
+sample_clusters <- function (K) {
+    df_gene_clusters %>%
+        filter(cluster_id == K) %>%
+        slice_sample(n=N_EXAMPLES) %$%
+        gene_name
+}
+```
+
+
+# Analysis
+
+## Gene Clusters
+### Cluster 1
+#### Shortening
+```{r plt_c1_short, fig.width=4, fig.height=6}
+CLUSTER="1"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c1_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c1_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+
+### Cluster 2
+#### Shortening
+```{r plt_c2_short, fig.width=4, fig.height=6}
+CLUSTER="2"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c2_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c2_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 3
+#### Shortening
+```{r plt_c3_short, fig.width=4, fig.height=6}
+CLUSTER="3"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c3_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c3_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 4
+#### Shortening
+```{r plt_c4_short, fig.width=4, fig.height=6}
+CLUSTER="4"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c4_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c4_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 5
+#### Shortening
+```{r plt_c5_short, fig.width=4, fig.height=6}
+CLUSTER="5"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c5_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c5_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 6
+#### Shortening
+```{r plt_c6_short, fig.width=4, fig.height=6}
+CLUSTER="6"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c6_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c6_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 7
+#### Shortening
+```{r plt_c7_short, fig.width=4, fig.height=6}
+CLUSTER="7"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c7_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c7_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 8
+#### Shortening
+```{r plt_c8_short, fig.width=4, fig.height=6}
+CLUSTER="8"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c8_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c8_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 9
+#### Shortening
+```{r plt_c9_short, fig.width=4, fig.height=6}
+CLUSTER="9"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c9_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c9_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 10
+#### Shortening
+```{r plt_c10_short, fig.width=4, fig.height=6}
+CLUSTER="10"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c10_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c10_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 11
+#### Shortening
+```{r plt_c11_short, fig.width=4, fig.height=6}
+CLUSTER="11"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c11_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c11_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 12
+#### Shortening
+```{r plt_c12_short, fig.width=4, fig.height=6}
+CLUSTER="12"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c12_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c12_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 13
+#### Shortening
+```{r plt_c13_short, fig.width=4, fig.height=6}
+CLUSTER="13"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c13_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c13_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 14
+#### Shortening
+```{r plt_c14_short, fig.width=4, fig.height=6}
+CLUSTER="14"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c14_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c14_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 15
+#### Shortening
+```{r plt_c15_short, fig.width=4, fig.height=6}
+CLUSTER="15"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c15_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c15_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 16
+#### Shortening
+```{r plt_c16_short, fig.width=4, fig.height=6}
+CLUSTER="16"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c16_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c16_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 17
+#### Shortening
+```{r plt_c17_short, fig.width=4, fig.height=6}
+CLUSTER="17"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c17_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c17_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 18
+#### Shortening
+```{r plt_c18_short, fig.width=4, fig.height=6}
+CLUSTER="18"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c18_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c18_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+### Cluster 19
+#### Shortening
+```{r plt_c19_short, fig.width=4, fig.height=6}
+CLUSTER="19"
+GENES=as.character(filter(df_short, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Lengthening
+```{r plt_c19_long, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_long, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+#### Minimal Change
+```{r plt_c19_min, fig.width=4, fig.height=4}
+GENES=as.character(filter(df_minchange, cluster_id == CLUSTER)$gene_name)
+for (g in GENES) {
+    plot_cluster(g, CLUSTER)
+}
+```
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

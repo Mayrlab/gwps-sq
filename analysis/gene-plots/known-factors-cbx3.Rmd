@@ -1,0 +1,279 @@
+---
+title: "Known Factor Isoform Plots"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Exploring visualization of isoform-level expression across perturbations of known
+APA factors.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(Matrix)
+library(matrixStats)
+library(SingleCellExperiment)
+library(Gviz)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(plyranges)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+options(ucscChromosomeNames=FALSE)
+BIN_WIDTH=50
+
+
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+FILE_SE="data/se/kd6_essential_bulk_expressed.Rds"
+FILE_GTF="../hcl/data/gff/utrome.e30.t5.gc39.pas3.f0.9999.w500.gtf.gz"
+```
+
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+se <- readRDS(FILE_SE)
+gr <- read_gff(FILE_GTF, genome_info='hg38') %>%
+    filter(type == 'transcript') %>%
+    anchor_3p() %>%
+    mutate(width=BIN_WIDTH)
+
+tr_genome <- GenomeAxisTrack(v=10)
+```
+
+## Preprocessing
+```{r prepare_data}
+gene2txs <- rowData(se) %>% 
+    as_tibble %>% 
+    dplyr::select(gene_name, transcript_id) %>%
+    group_by(gene_name) %>%
+    summarize(txs=list(transcript_id)) %>%
+    deframe()
+
+tpm_tx_target <- assay(se, "counts") %>% { 
+    idx_ntp <- str_detect(colnames(.), "non-targeting")
+    cts_ntp <- rowSums(.[,idx_ntp])
+    cts_tx_target <- .[, !idx_ntp]
+    cbind(cts_tx_target, "ntp"=cts_ntp)
+} %>%
+    { . %*% Diagonal(ncol(.), 1e6/colSums(.)) }
+```
+
+## Functions
+```{r methods}
+get_gene_gr <- function (gene) {
+    filter(gr, transcript_id %in% gene2txs[[gene]])
+}
+
+get_counts_gr <- function (gene, target) {
+    get_gene_gr(gene) %>%
+        mutate(score=tpm_tx_target[transcript_id, target]) %>%
+        select(score)
+}
+
+get_gene_tr <- function (gene, chr, start, end) {
+    GeneRegionTrack(txdb, chromosome=chr, start=start, end=end, symbol=gene,
+                    showId=TRUE, name=gene, geneSymbol=TRUE)
+}
+
+get_tpm_tr <- function (gene, target_symbol) {
+    target <- colnames(se) %>% {.[str_detect(., target_symbol)]}
+    DataTrack(get_counts_gr(gene, target), name=target_symbol, genome="hg38",
+                    type="hist", width=50)
+}
+
+harmonize_ylim <- function (trs) {
+    max_score <- max(sapply(trs, function (tr) { max(tr@data) }))
+    ylims <- c(0, max_score*1.05)
+    lapply(trs, function (tr) {
+        displayPars(tr) <- list(ylim=ylims)
+        tr
+    })
+}
+```
+
+
+# Analysis
+
+## CPSF
+
+```{r plt_cpsf, fig.width=4, fig.height=8}
+GENE="CBX3"
+CHR="chr7"
+START=26211957
+END=26213963
+
+tr_gene <- get_gene_tr(GENE, CHR, START, END)
+
+tr_ntp <- DataTrack(get_counts_gr(GENE, "ntp"), name="Non-Targeting", genome="hg38",
+                    type="hist", width=BIN_WIDTH)
+
+tr_cpsf1 <- get_tpm_tr(GENE, "CPSF1")
+tr_cpsf2 <- get_tpm_tr(GENE, "CPSF2")
+tr_cpsf3 <- get_tpm_tr(GENE, "CPSF3")
+tr_cpsf4 <- get_tpm_tr(GENE, "CPSF4")
+tr_fip1l1 <- get_tpm_tr(GENE, "FIP1L1")
+tr_sympk <- get_tpm_tr(GENE, "SYMPK")
+tr_wdr33 <- get_tpm_tr(GENE, "WDR33")
+
+trs_all <- list(tr_cpsf1, tr_cpsf2, tr_cpsf3, tr_cpsf4,
+                tr_fip1l1, tr_sympk, tr_wdr33, tr_ntp) %>% harmonize_ylim()
+
+plotTracks(append(trs_all, list(tr_gene, tr_genome)),
+           sizes=c(3,3,3,3,3,3,3,3,2,2),
+           from=START, to=END,
+           col.border.title="white",
+           fontcolor.title='grey20',
+           col.axis="grey20",
+           background.title='grey90')
+```
+
+
+## CFIm
+
+```{r plt_cfim, fig.width=4, fig.height=4}
+GENE="CBX3"
+CHR="chr7"
+START=26211957
+END=26213963
+
+#tr_gene <- get_gene_tr(GENE, CHR, START, END)
+
+tr_ntp <- DataTrack(get_counts_gr(GENE, "ntp"), name="Non-Targeting", genome="hg38",
+                    type="hist", width=BIN_WIDTH)
+
+tr_nudt21 <- get_tpm_tr(GENE, "NUDT21")
+tr_cpsf6 <- get_tpm_tr(GENE, "CPSF6")
+
+trs_all <- list(tr_cpsf6, tr_nudt21, tr_ntp) %>% harmonize_ylim()
+
+plotTracks(append(trs_all, list(tr_gene, tr_genome)),
+           sizes=c(3,3,3,2,2),
+           from=START, to=END,
+           col.border.title="white",
+           fontcolor.title='grey20',
+           col.axis="grey20",
+           background.title='grey90')
+```
+
+
+## CFIIm
+
+```{r plt_cfiim, fig.width=4, fig.height=4}
+GENE="CBX3"
+CHR="chr7"
+START=26211957
+END=26213963
+
+#tr_gene <- get_gene_tr(GENE, CHR, START, END)
+
+tr_ntp <- DataTrack(get_counts_gr(GENE, "ntp"), name="Non-Targeting", genome="hg38",
+                    type="hist", width=BIN_WIDTH)
+
+tr_pcf11 <- get_tpm_tr(GENE, "PCF11")
+tr_clp1 <- get_tpm_tr(GENE, "CLP1")
+
+trs_all <- list(tr_clp1, tr_pcf11, tr_ntp) %>% harmonize_ylim()
+
+plotTracks(append(trs_all, list(tr_gene, tr_genome)),
+           sizes=c(3,3,3,2,2),
+           from=START, to=END,
+           col.border.title="white",
+           fontcolor.title='grey20',
+           col.axis="grey20",
+           background.title='grey90')
+```
+
+
+## CSTF
+
+```{r plt_cstf, fig.width=4, fig.height=4}
+GENE="CBX3"
+CHR="chr7"
+START=26211957
+END=26213963
+
+#tr_gene <- get_gene_tr(GENE, CHR, START, END)
+
+tr_ntp <- DataTrack(get_counts_gr(GENE, "ntp"), name="Non-Targeting", genome="hg38",
+                    type="hist", width=BIN_WIDTH)
+
+tr_cstf1 <- get_tpm_tr(GENE, "CSTF1")
+tr_cstf3 <- get_tpm_tr(GENE, "CSTF3")
+
+trs_all <- list(tr_cstf1, tr_cstf3, tr_ntp) %>% harmonize_ylim()
+
+plotTracks(append(trs_all, list(tr_gene, tr_genome)),
+           sizes=c(3,3,3,2,2),
+           from=START, to=END,
+           col.border.title="white",
+           fontcolor.title='grey20',
+           col.axis="grey20",
+           background.title='grey90')
+```
+
+## PAF Complex
+
+```{r plt_paf, fig.width=4, fig.height=6}
+GENE="CBX3"
+CHR="chr7"
+START=26211957
+END=26213963
+
+#tr_gene <- get_gene_tr(GENE, CHR, START, END)
+
+tr_ntp <- DataTrack(get_counts_gr(GENE, "ntp"), name="Non-Targeting", genome="hg38",
+                    type="hist", width=BIN_WIDTH)
+
+tr_paf1 <- get_tpm_tr(GENE, "PAF1")
+tr_ctr9 <- get_tpm_tr(GENE, "CTR9")
+tr_rtf1 <- get_tpm_tr(GENE, "RTF1")
+tr_cdc73 <- get_tpm_tr(GENE, "CDC73")
+
+trs_all <- list(tr_cdc73, tr_ctr9, tr_paf1, tr_rtf1, tr_ntp) %>% harmonize_ylim()
+
+plotTracks(append(trs_all, list(tr_gene, tr_genome)),
+           sizes=c(3,3,3,3,3,2,2),
+           from=START, to=END,
+           col.border.title="white",
+           fontcolor.title='grey20',
+           col.axis="grey20",
+           background.title='grey90')
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

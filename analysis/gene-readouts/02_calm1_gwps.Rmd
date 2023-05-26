@@ -1,0 +1,282 @@
+---
+title: "CALM1 SU-LU Plots - GWPS"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+In previous work preparing a mouse cell atlas of 3' UTR usage, we identified the
+gene CALM1 as having one of the highest dynamic ranges of isoform usage accompanied by 
+robust gene expression in almost all cell types. In this exploratory analysis, we
+use abundance of CALM1 isoforms as a readout for shifts in isoform usage.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(Matrix)
+library(plotly)
+```
+
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+GENE="CALM1"
+FILE_ANNOTS="metadata/kd8-gwps-cell-annots.csv.gz"
+FILE_CTS_TOTAL="data/counts/kd8_gwps.cts_total_cell.Rds"
+RDS_CTS_GENE=sprintf("data/counts/raw/kd8_gwps.cts_%s_cell.Rds", tolower(GENE))
+
+LBL_TXS=c("ENST00000356978.9"="cts_lu", 
+          "ENST00000356978.9-UTR-2717"="cts_mu1",
+          "ENST00000544280.6"="cts_mu2", 
+          "ENST00000659177.1"="cts_su")
+FILE_OUT=sprintf("tbl/%s_gwps_targets.xlsx", tolower(GENE))
+DIR_IMG_OUT=sprintf("img/gene-readouts/kd8-gwps/%s-", tolower(GENE))
+
+## KNOWN FACTORS
+GENES_CPSF <- c("CPSF1", "CPSF2", "CPSF3", "CPSF4", "WDR33", "FIP1L1")
+GENES_CF1 <- c("NUDT21", "CPSF6", "CPSF7")
+GENES_CF2 <- c("PCF11", "CLP1")
+GENES_CSTF <- c("CSTF1", "CSTF2", "CSTF2T", "CSTF3")
+GENES_PAF <- c("PAF1", "CTR9", "RTF1")
+GENES_NEF <- c("NXF1", "SRSF3", "SRSF7", "THOC5")
+
+COLOR_MAP <- c("non-targeting"="grey",
+               "CPSF complex"="#8FD979",
+               "CFI complex"="purple",
+               "CFII complex"="#FFAA66",
+               "CSTF complex"="#F6CDA3",
+               "PAF complex"="steelblue",
+               "mRNA export factors"="magenta",
+               "other"="black")
+```
+
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+cts_total_cell <- readRDS(FILE_CTS_TOTAL)
+cts_gene_cell <- readRDS(RDS_CTS_GENE)
+df_cells <- read_csv(FILE_ANNOTS, col_types='cfiiicccccdddd')
+```
+
+## Preprocessing
+
+```{r prepare_data}
+## ensure cell order assumption
+stopifnot(all(colnames(cts_gene_cell) == names(cts_total_cell)))
+
+## sparse model matrix mapping cells to targets
+M_cell_target <- df_cells %>% 
+    dplyr::select(cell_id, sgID_AB) %>% deframe() %>%
+    fac2sparse() %>% t() %>%
+    `[`(names(cts_total_cell),)
+
+df_total <- drop(cts_total_cell %*% M_cell_target) %>%
+    enframe(name="sgID_AB", value="cts_total")
+
+df_gene <- t(cts_gene_cell %*% M_cell_target) %>%
+    `colnames<-`(LBL_TXS[colnames(.)]) %>%
+    as.matrix %>% as_tibble(rownames="sgID_AB")
+
+df_targets <- df_cells %>% 
+    group_by(target_gene, target_gene_id, sgID_AB) %>%
+    summarize(n_cells=dplyr::n(), .groups="drop") %>%
+    left_join(df_gene, by="sgID_AB") %>% 
+    left_join(df_total, by="sgID_AB") %>%
+    mutate(across(starts_with("cts"), ~ 1e6*.x/cts_total, .names="tpm_{.col}")) %>%
+    rename_with(~ str_remove(.x, "cts_"), starts_with("tpm")) %>%
+    mutate(gene_set=case_when(
+        target_gene == "non-targeting" ~ "non-targeting",
+        target_gene %in% GENES_CPSF ~ "CPSF complex",
+        target_gene %in% GENES_CF1 ~ "CFI complex",
+        target_gene %in% GENES_CF2 ~ "CFII complex",
+        target_gene %in% GENES_CSTF ~ "CSTF complex",
+        target_gene %in% GENES_PAF ~ "PAF complex",
+        target_gene %in% GENES_NEF ~ "mRNA export factors",
+        TRUE ~ "other"
+    ) %>% factor(levels=c("other", "non-targeting", "CPSF complex", 
+                          "CFI complex", "CFII complex", "CSTF complex",
+                          "PAF complex", "mRNA export factors"))) %>%
+    mutate(is_known=!gene_set %in% c("non-targeting", "other"))
+```
+
+## Export Table
+```{r export}
+writexl::write_xlsx(df_targets, FILE_OUT)
+```
+
+# Target Analysis
+We will explore whether any perturbations have effects on `r GENE` isoform expression.
+
+### `r GENE` SU vs MU1
+```{r plt_pair_su_mu1, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=tpm_su, y=tpm_mu1, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    #scale_size_manual(values=c(0.2, 0.4)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x=sprintf("TPM - %s SU", GENE),
+         y=sprintf("TPM - %s MU1", GENE),
+         color="Gene Set")
+
+ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_su_mu1, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=tpm_su, y=tpm_mu1, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x=sprintf("TPM - %s SU", GENE),
+         y=sprintf("TPM - %s MU1", GENE),
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "su-mu1.pdf"), width=8, height=6, dpi=300)
+```
+
+### `r GENE` SU vs MU2
+```{r plt_pair_su_mu2, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=tpm_su, y=tpm_mu2, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    #scale_size_manual(values=c(0.2, 0.4)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x=sprintf("TPM - %s SU", GENE),
+         y=sprintf("TPM - %s MU2", GENE),
+         color="Gene Set")
+
+ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_su_mu2, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=tpm_su, y=tpm_mu2, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x=sprintf("TPM - %s SU", GENE),
+         y=sprintf("TPM - %s MU2", GENE),
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "su-mu2.pdf"), width=8, height=6, dpi=300)
+```
+
+### `r GENE` MU1 vs MU2
+```{r plt_pair_mu1_mu2, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=tpm_mu1, y=tpm_mu2, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    #scale_size_manual(values=c(0.2, 0.4)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x=sprintf("TPM - %s MU1", GENE),
+         y=sprintf("TPM - %s MU2", GENE),
+         color="Gene Set")
+
+ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_mu1_mu2, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=tpm_mu1, y=tpm_mu2, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x=sprintf("TPM - %s MU1", GENE),
+         y=sprintf("TPM - %s MU2", GENE),
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "mu1-mu2.pdf"), width=8, height=6, dpi=300)
+```
+
+### `r GENE` SU vs LU
+```{r plt_pair_su_lu, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=tpm_su, y=tpm_lu, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    #scale_size_manual(values=c(0.2, 0.4)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x=sprintf("TPM - %s SU", GENE),
+         y=sprintf("TPM - %s LU", GENE),
+         color="Gene Set")
+
+ggplotly(g, tooltip=c("text", "gene_set", "x", "y", "n_cells"))
+```
+
+```{r static_plot_su_lu, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=tpm_su, y=tpm_lu, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    theme_bw() +
+    labs(x=sprintf("TPM - %s SU", GENE),
+         y=sprintf("TPM - %s LU", GENE),
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "su-lu.pdf"), width=8, height=6, dpi=300)
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

@@ -1,0 +1,303 @@
+---
+title: "Initial QC on KD6 Essential Data - Multi-UTR Genes"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Here we perform a second pass look at the data, similar to the first pass, but
+focusing specifically on multi-UTR genes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(ggbeeswarm)
+library(Matrix)
+library(matrixStats)
+library(SingleCellExperiment)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+FILE_SCE_TX="data/sce/kd6_essential.annot.txs.Rds"
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+sce <- readRDS(FILE_SCE_TX) %>% `[`(rowData(.)$utr_type_raw == 'multi',)
+```
+
+## Preprocessing
+Among our statistics, we will compute the percentage of UMIs corresponding to specific
+isoform classes, including IPA, proximal, and distal, in multi-UTR genes.
+
+```{r prepare_data}
+df_cells <- colData(sce) %>% as_tibble %>%
+    mutate(umis_total=colSums(counts(sce)),
+           pct_ipa=colSums(counts(sce[rowData(sce)$is_ipa,]))/umis_total,
+           pct_proximal=colSums(counts(sce[rowData(sce)$is_proximal,]))/umis_total,
+           pct_distal=colSums(counts(sce[rowData(sce)$is_distal,]))/umis_total)
+```
+
+# Target Analysis
+We will explore whether any perturbations have effects on basic transcriptome characteristics.
+These will also be compared against each other.
+
+```{r}
+df_targets <- df_cells %>%
+    group_by(target_gene, target_gene_id, sgID_AB) %>%
+    summarize(n_cells=dplyr::n(),
+              mean_umis_total=mean(umis_total),
+              pct_ipa=weighted.mean(pct_ipa, umis_total),
+              pct_proximal=weighted.mean(pct_proximal, umis_total),
+              pct_distal=weighted.mean(pct_distal, umis_total), .groups='drop')
+```
+
+
+### IPA
+```{r plt_ipa_targets, fig.width=6, fig.height=4}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_ipa)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_ipa, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs IPA", fill="Control")
+```
+
+
+```{r plt_violin_ipa, fig.width=5, fig.height=4}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_ipa)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from IPA isoforms",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+
+```{r ipa_min_max}
+df_targets %>%
+    select(target_gene, pct_ipa, mean_umis_total, sgID_AB) %>%
+    slice_max(pct_ipa, n=20)
+
+df_targets %>%
+    select(target_gene, pct_ipa, mean_umis_total, sgID_AB) %>%
+    slice_min(pct_ipa, n=20)
+```
+
+
+### Proximal
+```{r plt_proximal_targets, fig.width=6, fig.height=4}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_proximal)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_proximal, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs Proximal Transcript", fill="Control")
+```
+
+```{r plt_violin_proximal, fig.width=5, fig.height=4}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_proximal)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from proximal isoforms",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+```{r proximal_min_max}
+df_targets %>%
+    select(target_gene, pct_proximal, mean_umis_total, sgID_AB) %>%
+    slice_max(pct_proximal, n=20)
+
+df_targets %>%
+    select(target_gene, pct_proximal, mean_umis_total, sgID_AB) %>%
+    slice_min(pct_proximal, n=20)
+```
+
+### Distal
+```{r plt_distal_targets, fig.width=6, fig.height=4}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_distal)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_distal, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs Distal Transcripts", fill="Control")
+```
+
+```{r plt_violin_distal, fig.width=5, fig.height=4}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_distal)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from distal isoforms",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+```{r distal_min_max}
+df_targets %>%
+    select(target_gene, pct_distal, mean_umis_total, sgID_AB) %>%
+    slice_max(pct_distal, n=20)
+
+df_targets %>%
+    select(target_gene, pct_distal, mean_umis_total, sgID_AB) %>%
+    slice_min(pct_distal, n=20)
+```
+
+## Pair Plots
+### Proximal vs Distal
+```{r plt_pair_pr_ds, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_proximal, y=pct_distal, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from proximal isoforms",
+         y="Percent UMIs from distal isoforms")
+
+ggplotly(g, tooltip=c("text", "x", "y", "n_cells"))
+```
+
+Similar to the first pass, we observed three extreme outliers that have isoform switching
+effects: **CPSF6**, **NUDT21**, and **OGFOD1**. In the same direction - shortening when 
+knocked down - we see **CNOT1**, **PABPC1**, and **GATA1**, but with milder effect sizes.
+In the opposite direction - lengthening when knocked-down - we see **PCF11**, **SRSF7**,
+**FIP1L1**, and **NPAT**.
+
+Other factors appear to impact the isoforms almost independently. Namely, knockdown 
+of **TAF** proteins have a strong increase in distal isoforms.  Similarly, core factors,
+such as, **CPSF1-4**, **CSTF1**, and **CSTF3**.
+
+The **PAF1 complex** members form an outlier set that reduces proximial isoform usage 
+with little impact on distal usage, such as, **RTF1**, **PAF1**, and **CTF9**.
+
+### IPA vs Proximal
+```{r plt_pair_ipa_pr, fig.width=6, fig.height=6}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_ipa, y=pct_proximal, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from proximal isoforms")
+
+ggplotly(g, tooltip=c("text", "x", "y", "n_cells"))
+```
+
+Again, the isoform switchers from above are extreme outliers. Here we see that 
+knockdown of **PAF1 complex** members reduces proximal usage in favor of increased
+IPA usage.  This is in contrast to **GATA1** knockdown, which increase both IPA
+and proximal usage.
+
+### IPA vs Distal
+```{r plt_pair_ipa_ds, fig.width=6, fig.height=6}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_ipa, y=pct_distal, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from distal isoforms")
+
+ggplotly(g, tooltip=c("text", "x", "y", "n_cells"))
+```
+
+Here we observe the factors whose knockdown increased distal usage independent of
+proximal usage do so at the cost of decrease IPA usage. These were the **TAF** members,
+**CPSF1-4**, and **CSTF3**. Notably, **CPSF2** and **CPSF3** do not appear to impact
+IPA.
+
+# Conclusion
+
+Considering on multi-UTR genes provides a cleaner signal for effects on different
+isoforms. We now see many of the known factors stand out, and can identify other
+possible genes with isoform-specific effects.
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

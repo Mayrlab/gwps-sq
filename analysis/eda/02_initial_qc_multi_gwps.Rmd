@@ -1,0 +1,260 @@
+---
+title: "Initial QC on KD8 GWPS Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Here we perform a second pass look at the data, focusing on only multi-UTR genes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(ggbeeswarm)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+FILE_ANNOTS="metadata/kd8-gwps-cell-annots.csv.gz"
+FILE_CTS=c(cts_total="data/counts/kd8_gwps.cts_total_multi_cell.Rds",
+           cts_ipa="data/counts/kd8_gwps.cts_ipa_multi_cell.Rds",
+           cts_proximal="data/counts/kd8_gwps.cts_proximal_multi_cell.Rds",
+           cts_distal="data/counts/kd8_gwps.cts_distal_multi_cell.Rds")
+
+FILE_OUT="tbl/kd8_gwps_global_multi.xlsx"
+DIR_IMG_OUT="img/kd8-gwps-global-multi-"
+
+## KNOWN FACTORS
+GENES_CPSF <- c("CPSF1", "CPSF2", "CPSF3", "CPSF4", "WDR33", "FIP1L1")
+GENES_CF1 <- c("NUDT21", "CPSF6", "CPSF7")
+GENES_CF2 <- c("PCF11", "CLP1")
+GENES_CSTF <- c("CSTF1", "CSTF2", "CSTF2T", "CSTF3")
+GENES_PAF <- c("PAF1", "CTR9", "RTF1")
+GENES_NEF <- c("NXF1", "THOC1", "THOC2", "THOC3", "THOC5", "THOC6", "THOC7")
+GENES_SPL <- str_c("SRSF", 1:11)
+GENES_MTOR <- c("MTOR", "RPTOR", "MLST8", "CLK2", "AKT1")
+
+COLOR_MAP <- c("non-targeting"="grey",
+               "CPSF complex"="red4",
+               "CFI complex"="purple2",
+               "CFII complex"="orange2",
+               "CSTF complex"="peachpuff",
+               "PAF complex"="steelblue",
+               "mRNA export factors"="orchid2",
+               "splicing factors"="seagreen1",
+               "MTOR complex"="cyan",
+               "other"="black")
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_cts <- map2(FILE_CTS, names(FILE_CTS), 
+               ~ enframe(readRDS(.x), name="cell_id", value=.y)) %>%
+    reduce(left_join, by="cell_id")
+
+df_cells <- left_join(df_cts, 
+                      read_csv(FILE_ANNOTS, col_types='cfiiicccccdddd'), 
+                      by='cell_id')
+```
+
+## Preprocessing
+Among our statistics, we will compute the percentage of UMIs corresponding to specific
+isoform classes, including IPA, proximal, and distal.
+
+```{r prepare_data}
+df_cells %<>% 
+    mutate(pct_ipa=cts_ipa/cts_total,
+           pct_proximal=cts_proximal/cts_total,
+           pct_distal=cts_distal/cts_total)
+```
+
+# Target Analysis
+We will explore whether any perturbations have effects on basic transcriptome characteristics.
+These will also be compared against each other.
+
+```{r summarize_to_targets}
+df_targets <- df_cells %>%
+    group_by(target_gene, target_gene_id, sgID_AB) %>%
+    summarize(n_cells=dplyr::n(),
+              mean_cts_total=mean(cts_total),
+              pct_ipa=weighted.mean(pct_ipa, cts_total),
+              pct_proximal=weighted.mean(pct_proximal, cts_total),
+              pct_distal=weighted.mean(pct_distal, cts_total), .groups='drop') %>%
+    mutate(gene_set=case_when(
+        target_gene == "non-targeting" ~ "non-targeting",
+        target_gene %in% GENES_CPSF ~ "CPSF complex",
+        target_gene %in% GENES_CF1 ~ "CFI complex",
+        target_gene %in% GENES_CF2 ~ "CFII complex",
+        target_gene %in% GENES_CSTF ~ "CSTF complex",
+        target_gene %in% GENES_PAF ~ "PAF complex",
+        target_gene %in% GENES_NEF ~ "mRNA export factors",
+        target_gene %in% GENES_SPL ~ "splicing factors",
+        target_gene %in% GENES_MTOR ~ "MTOR complex",
+        TRUE ~ "other"
+    ) %>% factor(levels=c("other", "non-targeting", "CPSF complex", 
+                          "CFI complex", "CFII complex", "CSTF complex",
+                          "PAF complex", "mRNA export factors",
+                          "splicing factors", "MTOR complex"))) %>%
+    mutate(is_known=!gene_set %in% c("non-targeting", "other"))
+```
+
+
+### Export Table
+```{r export_tbl}
+writexl::write_xlsx(df_targets, FILE_OUT)
+```
+
+# Pair Plots
+### Proximal vs Distal
+```{r plt_pair_pr_ds, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=pct_proximal, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from proximal isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+    
+ggplotly(g, tooltip=c("text", "x", "y", "gene_set", "n_cells"))
+```
+
+
+```{r static_plot_pr_ds, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=pct_proximal, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    labs(x="Percent UMIs from proximal isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "su-lu.pdf"), width=8, height=6, dpi=300)
+```
+
+### IPA vs Proximal
+```{r plt_pair_ipa_pr, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_proximal, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from proximal isoforms",
+         color="Gene Set")
+    
+ggplotly(g, tooltip=c("text", "x", "y", "gene_set", "n_cells"))
+```
+
+```{r static_plot_ipa_pr, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_proximal, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from proximal isoforms",
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "ipa-su.pdf"), width=8, height=6, dpi=300)
+```
+
+### IPA vs Distal
+```{r plt_pair_ipa_ds, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(aes(size=n_cells), pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+    
+ggplotly(g, tooltip=c("text", "x", "y", "gene_set", "n_cells"))
+```
+
+```{r static_plot_ipa_ds, fig.width=8, fig.height=6}
+df_targets %>%
+    ggplot(aes(x=pct_ipa, y=pct_distal, color=gene_set, text=target_gene)) +
+    geom_point(data=filter(df_targets, gene_set == 'other'), size=0.5) +
+    geom_point(data=filter(df_targets, gene_set == 'non-targeting'), size=0.5) +
+    geom_point(data=filter(df_targets, is_known), size=3) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=COLOR_MAP) +
+    scale_size_continuous(range=c(0.05, 3)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=0.1)) +
+    theme_bw() +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from distal isoforms",
+         color="Gene Set")
+
+ggsave(str_c(DIR_IMG_OUT, "ipa-lu.pdf"), width=8, height=6, dpi=300)
+```
+
+# Conclusion
+
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

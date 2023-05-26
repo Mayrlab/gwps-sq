@@ -1,0 +1,450 @@
+---
+title: "Initial QC on KD8 GWPS Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Here we perform a first pass look at the data. We will plot some high-level statistics
+and see where the various perturbations fall with respect to these readouts. We 
+expect to see that for all readouts, the non-targeting experiments display a central
+distribution, with most perturbations falling nearby. Perturbations that impact the
+statistics are expected to appear as outliers.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(ggbeeswarm)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+FILE_ANNOTS="metadata/kd8-gwps-cell-annots.csv.gz"
+FILE_CTS=c(cts_total="data/counts/kd8_gwps.cts_total_cell.Rds",
+           cts_ipa="data/counts/kd8_gwps.cts_ipa_cell.Rds",
+           cts_proximal="data/counts/kd8_gwps.cts_proximal_cell.Rds",
+           cts_distal="data/counts/kd8_gwps.cts_distal_cell.Rds",
+           cts_mt="data/counts/kd8_gwps.cts_mt_cell.Rds")
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_cts <- map2(FILE_CTS, names(FILE_CTS), 
+               ~ enframe(readRDS(.x), name="cell_id", value=.y)) %>%
+    reduce(left_join, by="cell_id")
+
+df_cells <- left_join(df_cts, 
+                      read_csv(FILE_ANNOTS, col_types='cfiiicccccdddd'), 
+                      by='cell_id')
+```
+
+## Preprocessing
+Among our statistics, we will compute the percentage of UMIs corresponding to specific
+isoform classes, including IPA, proximal, and distal, as well as UMIs from mitochondrial genes.
+
+```{r prepare_data}
+df_cells %<>% 
+    mutate(pct_ipa=cts_ipa/cts_total,
+           pct_proximal=cts_proximal/cts_total,
+           pct_distal=cts_distal/cts_total,
+           pct_mt=cts_mt/cts_total)
+```
+
+# Analysis
+## UMIs per Cell
+
+```{r plt_umis, fig.width=4, fig.height=4}
+df_cells %>%
+    ggplot(aes(x=UMI_count, y=cts_total)) +
+    geom_density2d_filled() +
+    geom_abline(linetype='dashed', color="white") +
+    scale_x_log10(expand=c(0,0)) + scale_y_log10(expand=c(0,0)) +
+    scale_fill_viridis_d(option="F") +
+    theme_bw() +
+    labs(x="UMI counts per cell [published]", 
+         y="UMI counts per cell [scUTRquant]") +
+    guides(fill='none')
+```
+
+## Cells per Sample
+The scUTRquant QC showed the elbow plots were not well defined for Lanes 21 and 48, 
+which led to very high numbers of barcodes being called as cells. We hope to see that
+these samples do not have a high number of annotation cells.
+
+```{r plt_samples, fig.width=4, fig.height=16}
+df_cells %>%
+    mutate(sample_id=fct_infreq(sample_id)) %>%
+    ggplot(aes(y=sample_id)) +
+    geom_bar(fill='lightgrey', color='black', size=0.2) +
+    scale_x_continuous(expand=c(0,0,0.05,0)) +
+    theme_bw() +
+    labs(x="Cells", y="Sample")
+```
+
+We should check the scUTRquant QC plots for the samples with low counts.
+
+## Cells per target
+```{r plt_targets, fig.width=4, fig.height=3}
+df_cells %>%
+    mutate(target_gene=fct_infreq(target_gene)) %>%
+    dplyr::count(target_gene, name="n_cells") %>%
+    filter(target_gene != 'non-targeting') %T>%
+    { n_cells_median <<- median(.$n_cells); n_targets <<- nrow(.) } %>%
+    ggplot() +
+    geom_bar(aes(x=target_gene, y=n_cells), stat='identity', fill='grey', width=1) +
+    geom_hline(yintercept=n_cells_median, linetype='dashed') +
+    annotate("text", x=n_targets/2, y=n_cells_median+30, 
+             label=sprintf("median = %d", n_cells_median)) +
+    scale_y_log10(expand=c(0,0,0.05,0)) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Cells")
+```
+
+# Target Analysis
+We will explore whether any perturbations have effects on basic transcriptome characteristics.
+These will also be compared against each other.
+
+```{r}
+df_targets <- df_cells %>%
+    group_by(target_gene, target_gene_id, sgID_AB) %>%
+    summarize(mean_cts_total=mean(cts_total),
+              pct_ipa=weighted.mean(pct_ipa, cts_total),
+              pct_proximal=weighted.mean(pct_proximal, cts_total),
+              pct_distal=weighted.mean(pct_distal, cts_total),
+              pct_mt=weighted.mean(pct_mt, cts_total), .groups='drop')
+```
+
+### Mitochondrial
+```{r plt_mt_targets, fig.width=8, fig.height=6}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_mt)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_mt, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs Mitochondrial", fill="Control")
+    
+```
+
+```{r plt_violin_mt, fig.width=8, fig.height=6}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_mt)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from chrM",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+
+```{r mt_min_max}
+df_targets %>%
+    select(target_gene, pct_mt, mean_cts_total, sgID_AB) %>%
+    slice_max(pct_mt, n=20)
+
+df_targets %>%
+    select(target_gene, pct_mt, mean_cts_total, sgID_AB) %>%
+    slice_min(pct_mt, n=20)
+```
+
+### IPA
+```{r plt_ipa_targets, fig.width=8, fig.height=6}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_ipa)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_ipa, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs IPA", fill="Control")
+```
+
+
+```{r plt_violin_ipa, fig.width=8, fig.height=6}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_ipa)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from IPA isoforms",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+
+```{r ipa_min_max}
+df_targets %>%
+    select(target_gene, pct_ipa, mean_cts_total, sgID_AB) %>%
+    slice_max(pct_ipa, n=20)
+
+df_targets %>%
+    select(target_gene, pct_ipa, mean_cts_total, sgID_AB) %>%
+    slice_min(pct_ipa, n=20)
+```
+
+
+### Proximal
+```{r plt_proximal_targets, fig.width=8, fig.height=6}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_proximal)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_proximal, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs Proximal Transcript", fill="Control")
+```
+
+```{r plt_violin_proximal, fig.width=8, fig.height=6}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_proximal)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from proximal isoforms",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+```{r proximal_min_max}
+df_targets %>%
+    select(target_gene, pct_proximal, mean_cts_total, sgID_AB) %>%
+    slice_max(pct_proximal, n=20)
+
+df_targets %>%
+    select(target_gene, pct_proximal, mean_cts_total, sgID_AB) %>%
+    slice_min(pct_proximal, n=20)
+```
+
+### Distal
+```{r plt_distal_targets, fig.width=8, fig.height=6}
+df_targets %>%
+    mutate(sgID_AB=fct_reorder(sgID_AB, -pct_distal)) %>%
+    ggplot(aes(x=sgID_AB, y=pct_distal, fill=target_gene == "non-targeting")) +
+    geom_bar(stat='identity') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey', 'red')) +
+    theme_bw() +
+    theme(axis.text.x=element_blank(), axis.ticks.x=element_blank()) + 
+    labs(x="Target Gene", y="Percent UMIs Distal Transcripts", fill="Control")
+```
+
+```{r plt_violin_distal, fig.width=8, fig.height=6}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x="Perturbations", y=pct_distal)) +
+    geom_violin(fill='lightgrey', size=0.2, draw_quantiles=c(0.25, 0.50, 0.75)) +
+    geom_quasirandom(aes(color=is_nt, size=is_nt, text=target_gene), 
+                     pch=16) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.1,1), guide='none') +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    labs(x=NULL, y="Percent UMIs from distal isoforms",
+         color="Control")
+
+ggplotly(g, tooltip=c("text", "y")) %>%
+    style(hoverinfo = "skip", traces = 1)
+```
+
+```{r distal_min_max}
+df_targets %>%
+    select(target_gene, pct_distal, mean_cts_total, sgID_AB) %>%
+    slice_max(pct_distal, n=20)
+
+df_targets %>%
+    select(target_gene, pct_distal, mean_cts_total, sgID_AB) %>%
+    slice_min(pct_distal, n=20)
+```
+
+## Pair Plots
+### Proximal vs Distal
+```{r plt_pair_pr_ds, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_proximal, y=pct_distal, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=is_nt), 
+               pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.2,0.8)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from proximal isoforms",
+         y="Percent UMIs from distal isoforms")
+
+ggplotly(g, tooltip=c("text", "x", "y"))
+```
+
+
+
+### IPA vs Proximal
+```{r plt_pair_ipa_pr, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_ipa, y=pct_proximal, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=is_nt), 
+               pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.2,0.8)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from proximal isoforms")
+
+ggplotly(g, tooltip=c("text", "x", "y"))
+```
+
+### IPA vs Distal
+```{r plt_pair_ipa_ds, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_ipa, y=pct_distal, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=is_nt), 
+               pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.2,0.8)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from distal isoforms")
+
+ggplotly(g, tooltip=c("text", "x", "y"))
+```
+
+
+### IPA vs MT
+```{r plt_pair_ipa_mt, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_ipa, y=pct_mt, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=is_nt), 
+               pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.2,0.8)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from IPA isoforms",
+         y="Percent UMIs from chrM")
+
+ggplotly(g, tooltip=c("text", "x", "y"))
+```
+
+
+### Proximal vs MT
+```{r plt_pair_proximal_mt, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_proximal, y=pct_mt, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=is_nt), 
+               pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.2,0.8)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from Proximal isoforms",
+         y="Percent UMIs from chrM")
+
+ggplotly(g, tooltip=c("text", "x", "y"))
+```
+
+
+### Distal vs MT
+```{r plt_pair_distal_mt, fig.width=8, fig.height=8}
+g <- df_targets %>%
+    mutate(is_nt=target_gene == "non-targeting") %>%
+    ggplot(aes(x=pct_distal, y=pct_mt, color=is_nt, text=target_gene)) +
+    geom_point(aes(size=is_nt), 
+               pch=16) +
+    geom_rug(size=0.1) +
+    scale_color_manual(values=c("black", "red")) +
+    scale_size_manual(values=c(0.2,0.8)) +
+    scale_x_continuous(labels=scales::percent_format(accuracy=1)) +
+    scale_y_continuous(labels=scales::percent_format(accuracy=1)) +
+    theme_bw() +
+    theme(legend.position="none") +
+    labs(x="Percent UMIs from Distal isoforms",
+         y="Percent UMIs from chrM")
+
+ggplotly(g, tooltip=c("text", "x", "y"))
+```
+
+# Conclusion
+
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```
