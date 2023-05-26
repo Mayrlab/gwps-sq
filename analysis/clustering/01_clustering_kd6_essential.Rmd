@@ -1,0 +1,372 @@
+---
+title: "Clustering on KD6 Essential Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We perform cluster of features and perturbations to identify isoforms that exhibit
+similar perturbation outcomes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(Matrix)
+library(matrixStats)
+library(SingleCellExperiment)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## filtering options
+MIN_UMIS=100
+
+## clustering options
+K_TX=30
+K_TGT=50
+N_SAMPLES_CLARA=50
+TRACE_CLARA=if (interactive()) 1 else 0
+
+## input files
+FILE_SCE_TX="data/sce/kd6_essential.annot.txs.Rds"
+
+## output files, etc
+STR_TODAY <- format(Sys.time(), '%Y%m%d')
+FMT_FILE_GO_TX <- "data/clusters/%s-tx-clusters-go-%s-%s-clara-%d.xlsx"
+FMT_FILE_RAW_TX <- "data/clusters/%s-tx-clusters-clara-%d.csv"
+FMT_FILE_GO_TGT <- "data/clusters/%s-target-clusters-go-%s-%s-clara-%d.xlsx"
+FMT_FILE_RAW_TGT <- "data/clusters/%s-target-clusters-clara-%d.csv"
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+sce <- readRDS(FILE_SCE_TX)
+```
+
+## Preprocessing
+
+```{r prepare_data}
+idx_txs <- rowSums(counts(sce)) > MIN_UMIS
+idx_cells <- sce$target_gene != 'non-targeting'
+sce %<>% `[`(idx_txs, idx_cells)
+
+tx2gene <- rowData(sce) %>% as_tibble %>%
+    dplyr::select(transcript_id, gene_name) %>%
+    deframe()
+
+M_cell_group <- fac2sparse(sce$sgID_AB) %>% t
+#N_cell_group <- Diagonal(ncol(sce), 1/sce$core_scale_factor) %*% M_cell_group
+
+cts_tx_group <- counts(sce) %*% M_cell_group
+#ncts_tx_group <- counts(sce) %*% N_cell_group
+
+tpm_tx_group <- cts_tx_group %>% { . %*% Diagonal(ncol(.), 1e6/colSums(.)) } 
+```
+
+# Analysis
+## Clustering Isoforms
+```{r cluster_clara}
+clusters_tx <- cluster::clara(tpm_tx_group, stand=TRUE,
+                              k=K_TX, samples=N_SAMPLES_CLARA,
+                              trace=TRACE_CLARA, cluster.only=TRUE)
+```
+
+```{r export_cluster_raw_tx}
+df_txs <- rowData(sce) %>% as_tibble %>%
+    dplyr::select(transcript_id, utr_name, utr_rank, gene_name) %>%
+    right_join(enframe(clusters_tx, name="transcript_id", value="cluster_id"),
+               by="transcript_id") %>%
+    arrange(gene_name, utr_rank) %>%
+    write_csv(sprintf(FMT_FILE_RAW_TX, STR_TODAY, K_TX))
+```
+
+## GO Analysis
+### Molecular Function
+```{r go_mf, fig.width=10, fig.height=12}
+genes_all <- unique(names(tx2gene))
+
+GO_ONT = 'MF'
+
+ls_res <- list()
+
+for (i in seq(K_TX)) {
+  print(sprintf("Cluster %d (%d isoforms)", i, sum(clusters_tx == i)))
+  
+  txs_i <- clusters_tx %>% `[`(. == i) %>% names()
+  genes_i <- unique(tx2gene[txs_i])
+  res <- enrichGO(gene=genes_i, OrgDb=org.Hs.eg.db, keyType="SYMBOL", 
+                  ont=GO_ONT, readable=FALSE, pvalueCutoff=0.1, qvalueCutoff=0.2)
+  
+  if (is.null(res)) { 
+      ls_res[[sprintf("Cluster %d", i)]] <- tibble(message="enrichGO returned NULL") 
+  } else {
+      ls_res[[sprintf("Cluster %d", i)]] <- res@result %>% 
+          mutate(geneID=str_replace_all(geneID, "/", ", ")) %>% 
+          dplyr::select("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "qvalue", "geneID")
+      
+      if (sum(res@result$p.adjust < 0.1) > 3) {
+          barplot(res, showCategory=20) %>% print()
+      }
+      if (sum(res@result$p.adjust < 0.05) > 3) {
+          emapplot(enrichplot::pairwise_termsim(res)) %>% print()
+      }
+  }
+}
+```
+
+```{r export_mf_tx}
+writexl::write_xlsx(ls_res, sprintf(FMT_FILE_GO_TX, STR_TODAY, 
+                                    str_to_lower(GO_ONT), "all", K_TX))
+```
+
+### Biological Process
+```{r go_bp_tx, fig.width=10, fig.height=12}
+genes_all <- unique(names(tx2gene))
+
+GO_ONT = 'BP'
+
+ls_res <- list()
+
+for (i in  seq(K_TX)) {
+  print(sprintf("Cluster %d (%d isoforms)", i, sum(clusters_tx == i)))
+  
+  txs_i <- clusters_tx %>% `[`(. == i) %>% names()
+  genes_i <- unique(tx2gene[txs_i])
+  res <- enrichGO(gene=genes_i, OrgDb=org.Hs.eg.db, keyType="SYMBOL", 
+                  ont=GO_ONT, readable=FALSE, pvalueCutoff=0.1, qvalueCutoff=0.2)
+  
+  if (is.null(res)) { 
+      ls_res[[sprintf("Cluster %d", i)]] <- tibble(message="enrichGO returned NULL") 
+  } else {
+      ls_res[[sprintf("Cluster %d", i)]] <- res@result %>% 
+          mutate(geneID=str_replace_all(geneID, "/", ", ")) %>% 
+          dplyr::select("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "qvalue", "geneID")
+      
+      if (sum(res@result$p.adjust < 0.1) > 3) {
+          barplot(res, showCategory=20) %>% print()
+      }
+      if (sum(res@result$p.adjust < 0.05) > 3) {
+          emapplot(enrichplot::pairwise_termsim(res)) %>% print()
+      }
+  }
+}
+```
+
+
+```{r export_bp_tx}
+writexl::write_xlsx(ls_res, sprintf(FMT_FILE_GO_TX, STR_TODAY, 
+                                    str_to_lower(GO_ONT), "all", K_TX))
+```
+
+### Cellular Component
+```{r go_cc_tx, fig.width=10, fig.height=12}
+genes_all <- unique(names(tx2gene))
+
+GO_ONT = 'CC'
+
+ls_res <- list()
+
+for (i in  seq(K_TX)) {
+  print(sprintf("Cluster %d (%d isoforms)", i, sum(clusters_tx == i)))
+  
+  txs_i <- clusters_tx %>% `[`(. == i) %>% names()
+  genes_i <- unique(tx2gene[txs_i])
+  res <- enrichGO(gene=genes_i, OrgDb=org.Hs.eg.db, keyType="SYMBOL", 
+                  ont=GO_ONT, readable=FALSE, pvalueCutoff=0.1, qvalueCutoff=0.2)
+  
+  if (is.null(res)) { 
+      ls_res[[sprintf("Cluster %d", i)]] <- tibble(message="enrichGO returned NULL") 
+  } else {
+      ls_res[[sprintf("Cluster %d", i)]] <- res@result %>% 
+          mutate(geneID=str_replace_all(geneID, "/", ", ")) %>% 
+          dplyr::select("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "qvalue", "geneID")
+      
+      if (sum(res@result$p.adjust < 0.1) > 3) {
+          barplot(res, showCategory=20) %>% print()
+      }
+      if (sum(res@result$p.adjust < 0.05) > 3) {
+          emapplot(enrichplot::pairwise_termsim(res)) %>% print()
+      }
+  }
+}
+```
+
+
+```{r export_cc_tx}
+writexl::write_xlsx(ls_res, sprintf(FMT_FILE_GO_TX, STR_TODAY, 
+                                    str_to_lower(GO_ONT), "all", K_TX))
+```
+
+
+## Clustering Targets
+```{r cluster_clara_targets}
+clusters_target <- cluster::clara(t(tpm_tx_group),  stand=TRUE,
+                                  k=K_TGT, samples=N_SAMPLES_CLARA,
+                                  trace=TRACE_CLARA, cluster.only=TRUE)
+```
+
+```{r export_raw_target_clusters}
+df_targets <- colData(sce) %>% as_tibble %>%
+    distinct(target_gene, target_gene_id, sgID_AB) %>%
+    right_join(enframe(clusters_target, name="sgID_AB", value="cluster_id"), by="sgID_AB")
+
+df_targets %>%
+    write_csv(sprintf(FMT_FILE_RAW_TGT, STR_TODAY, K_TGT))
+```
+
+### Molecular Function
+```{r go_mf_target, fig.width=10, fig.height=12}
+genes_all <- unique(df_targets$target_gene)
+
+GO_ONT = 'MF'
+
+ls_res <- list()
+
+for (i in seq(K_TGT)) {
+  print(sprintf("Cluster %d (%d targets)", i, sum(df_targets$cluster_id == i)))
+  
+  res <- df_targets %>%
+      filter(cluster_id == i) %$%
+      enrichGO(gene=target_gene, OrgDb=org.Hs.eg.db, keyType="SYMBOL", universe=genes_all,
+                  ont=GO_ONT, readable=FALSE, pvalueCutoff=0.1, qvalueCutoff=0.2)
+  
+  if (is.null(res)) { 
+      ls_res[[sprintf("Cluster %d", i)]] <- tibble(message="enrichGO returned NULL") 
+  } else {
+      ls_res[[sprintf("Cluster %d", i)]] <- res@result %>% 
+          mutate(geneID=str_replace_all(geneID, "/", ", ")) %>% 
+          dplyr::select("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "qvalue", "geneID")
+      
+      if (sum(res@result$p.adjust < 0.1) > 3) {
+          barplot(res, showCategory=20) %>% print()
+      }
+      if (sum(res@result$p.adjust < 0.05) > 3) {
+          emapplot(enrichplot::pairwise_termsim(res)) %>% print()
+      }
+  }
+}
+```
+
+
+```{r export_mf_target}
+writexl::write_xlsx(ls_res, sprintf(FMT_FILE_GO_TGT, STR_TODAY, 
+                                    str_to_lower(GO_ONT), "targets", K_TGT))
+```
+
+### Biological Process
+```{r go_bp_target, fig.width=10, fig.height=12}
+genes_all <- unique(df_targets$target_gene)
+
+GO_ONT = 'BP'
+
+ls_res <- list()
+
+for (i in seq(K_TGT)) {
+  print(sprintf("Cluster %d (%d targets)", i, sum(df_targets$cluster_id == i)))
+  
+  res <- df_targets %>%
+      filter(cluster_id == i) %$%
+      enrichGO(gene=target_gene, OrgDb=org.Hs.eg.db, keyType="SYMBOL", universe=genes_all,
+                  ont=GO_ONT, readable=FALSE, pvalueCutoff=0.1, qvalueCutoff=0.2)
+  
+  if (is.null(res)) { 
+      ls_res[[sprintf("Cluster %d", i)]] <- tibble(message="enrichGO returned NULL") 
+  } else {
+      ls_res[[sprintf("Cluster %d", i)]] <- res@result %>% 
+          mutate(geneID=str_replace_all(geneID, "/", ", ")) %>% 
+          dplyr::select("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "qvalue", "geneID")
+      
+      if (sum(res@result$p.adjust < 0.1) > 3) {
+          barplot(res, showCategory=20) %>% print()
+      }
+      if (sum(res@result$p.adjust < 0.05) > 3) {
+          emapplot(enrichplot::pairwise_termsim(res)) %>% print()
+      }
+  }
+}
+```
+
+
+```{r export_bp_target}
+writexl::write_xlsx(ls_res, sprintf(FMT_FILE_GO_TGT, STR_TODAY, 
+                                    str_to_lower(GO_ONT), "targets", K_TGT))
+```
+
+
+### Cellular Component
+```{r go_cc_target, fig.width=10, fig.height=12}
+genes_all <- unique(df_targets$target_gene)
+
+GO_ONT = 'CC'
+
+ls_res <- list()
+
+for (i in seq(K_TGT)) {
+  print(sprintf("Cluster %d (%d targets)", i, sum(df_targets$cluster_id == i)))
+  
+  res <- df_targets %>%
+      filter(cluster_id == i) %$%
+      enrichGO(gene=target_gene, OrgDb=org.Hs.eg.db, keyType="SYMBOL", universe=genes_all,
+                  ont=GO_ONT, readable=FALSE, pvalueCutoff=0.1, qvalueCutoff=0.2)
+  
+  if (is.null(res)) { 
+      ls_res[[sprintf("Cluster %d", i)]] <- tibble(message="enrichGO returned NULL") 
+  } else {
+      ls_res[[sprintf("Cluster %d", i)]] <- res@result %>% 
+          mutate(geneID=str_replace_all(geneID, "/", ", ")) %>% 
+          dplyr::select("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "qvalue", "geneID")
+      
+      if (sum(res@result$p.adjust < 0.1) > 3) {
+          barplot(res, showCategory=20) %>% print()
+      }
+      if (sum(res@result$p.adjust < 0.05) > 3) {
+          emapplot(enrichplot::pairwise_termsim(res)) %>% print()
+      }
+  }
+}
+```
+
+
+```{r export_cc_target}
+writexl::write_xlsx(ls_res, sprintf(FMT_FILE_GO_TGT, STR_TODAY, 
+                                    str_to_lower(GO_ONT), "targets", K_TGT))
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

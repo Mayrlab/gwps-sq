@@ -1,0 +1,169 @@
+---
+title: "Response Modules - Gene Features"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(plyranges)
+library(org.Hs.eg.db)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+FILE_CLUSTERS="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+FILE_CLUSTERS_OUT="tbl/df_gene_nnclusters_kd6_essential_ui10_annot.csv"
+FILE_GENCODE="../hcl/data/gff/gencode.v39.mRNA_ends_found.gff3.gz"
+CLUSTERS_NOISE=c(9,12,13)
+```
+
+## Functions
+```{r methods}
+
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_clusters <- read_csv(FILE_CLUSTERS) %>%
+    mutate(cluster_id=factor(cluster_id, levels=sort(unique(cluster_id))))
+
+gr_gencode <- read_gff(FILE_GENCODE)
+```
+
+# Compute Features
+## Number of Exons
+
+```{r compute_n_exons}
+df_exons <- gr_gencode %>% 
+    filter(gene_id %in% df_clusters$gene_id, type == "exon") %>%
+    mcols %>% as_tibble %>%
+    group_by(gene_id) %>%
+    summarize(n_exons=max(as.integer(exon_number)))
+
+df_exons %>% head
+```
+
+## Gene Length
+```{r compute_gene_length}
+df_width <- gr_gencode %>%
+    filter(gene_id %in% df_clusters$gene_id, type == "gene") %>%
+    as_tibble %>% dplyr::select(gene_id, width)
+
+df_width %>% head
+```
+
+## UTR Length
+```{r compute_utr_length}
+df_utr_length <- gr_gencode %>%
+    filter(gene_id %in% df_clusters$gene_id, 
+           type %in% c('transcript', 'stop_codon'),
+           transcript_type == 'protein_coding') %>%
+    anchor_3p() %>% mutate(width=0) %>%
+    as_tibble %>% dplyr::select(gene_id, transcript_id, type, end) %>%
+    group_by(gene_id, transcript_id) %>%
+    filter(sum(type == 'stop_codon') == 1) %>%
+    summarize(utr_length=abs(end[type == "transcript"] - end[type == "stop_codon"]), 
+              .groups='drop_last') %>%
+    summarize(max_utr_length=max(utr_length))
+
+df_utr_length %>% head
+```
+
+## Plot Max UTR Lengths
+```{r plt_utr_lengths, fig.width=5, fig.height=3}
+df_utr_length %>%
+    ggplot(aes(x=max_utr_length)) +
+    geom_density(fill='orchid', alpha=0.4, ) +
+    coord_cartesian(xlim=c(0,1e4)) +
+    labs(x="Maximum 3' UTR Length", y="Density") +
+    theme_bw()
+```
+
+# Clusters
+```{r attach_features}
+df_clusters %<>%
+    left_join(df_exons, by='gene_id') %>%
+    left_join(df_width, by='gene_id') %>%
+    left_join(df_utr_length, by='gene_id')
+
+df_clusters %>% head
+```
+
+## Export features
+```{r export}
+df_clusters %>% write_csv(FILE_CLUSTERS_OUT)
+```
+
+## Plot
+### Number of Exons
+```{r plt_exons, width=4, height=3}
+df_clusters %>%
+    ggplot(aes(x=cluster_id, y=n_exons)) +
+    geom_boxplot() +
+    stat_summary(fun.data=~ c(y=-3, label=length(.x)), geom="text") +
+    labs(x="Cluster ID", y="Number of exons") +
+    theme_bw()
+```
+
+### Width of Transcription Locus
+```{r plt_, width=4, height=3}
+df_clusters %>%
+    ggplot(aes(x=cluster_id, y=width)) +
+    geom_boxplot() +
+    stat_summary(fun.data=~ c(y=2, label=length(.x)), geom="text") +
+    scale_y_log10() + 
+    labs(x="Cluster ID", y="Transcription locus (nts)") +
+    theme_bw()
+```
+
+
+### LU UTR Length
+```{r plt_utr_length, width=4, height=3}
+df_clusters %>%
+    ggplot(aes(x=cluster_id, y=max_utr_length)) +
+    geom_boxplot() +
+    stat_summary(fun.data=~ c(y=1, label=length(.x)), geom="text") +
+    scale_y_log10() + 
+    labs(x="Cluster ID", y="LU length (nts)") +
+    theme_bw()
+```
+
+# Conclusion
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

@@ -1,0 +1,97 @@
+---
+title: "Annotation Enrichment Analysis - Target Modules"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+FILE_CLUSTERS="tbl/df_target_clusters_hc_kd8_gwps_ui10.csv"
+MAX_PVAL=0.1
+MAX_QVAL=0.1
+```
+
+## Functions
+```{r methods}
+run_go <- function (genes, ...) {
+    enrichGO(gene=genes, OrgDb=org.Hs.eg.db, keyType="ENSEMBL",
+             readable=FALSE, pvalueCutoff=MAX_PVAL, qvalueCutoff=MAX_QVAL, ...)
+}
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_clusters <- read_csv(FILE_CLUSTERS) %>%
+    dplyr::rename(gene_name=target_gene, gene_id=target_gene_id)
+```
+
+# Enrichment Analysis
+
+```{r loop, fig.width=12, fig.height=12}
+for (i in unique(df_clusters$cluster_id)) {
+    genes <- filter(df_clusters, cluster_id == i) %$% unique(gene_id)
+    
+    sprintf("Cluster %d (%d genes)", i, length(genes)) %>% cat(fill=TRUE)
+    
+    cat("Biological Process", fill=TRUE)
+    res <- run_go(genes, ont="BP")
+    try({ print(barplot(res, showCategory=10)) })
+    try({ print(emapplot(enrichplot::pairwise_termsim(res))) })
+    
+    cat("Cellular Component", fill=TRUE)
+    res <- run_go(genes, ont="CC")
+    try({ print(barplot(res, showCategory=10)) })
+    try({ print(emapplot(enrichplot::pairwise_termsim(res))) })
+    
+    cat("Molecular Function", fill=TRUE)
+    res <- run_go(genes, ont="MF")
+    try({ print(barplot(res, showCategory=10)) })
+    try({ print(emapplot(enrichplot::pairwise_termsim(res))) })
+}
+```
+
+
+# Conclusion
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

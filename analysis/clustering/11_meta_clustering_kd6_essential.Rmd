@@ -1,0 +1,354 @@
+---
+title: "Meta-Clustering on KD6 Essential Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Using the target and gene clusters previously computed, we cluster on the cluster
+averages. The hierarchical clustering is used to reorder the heatmaps.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+library(bluster)
+library(Matrix)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+CLUSTERS_GENE_UNREG=c(9,12,13)
+
+## input files
+FILE_CLUSTERS_TARGETS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+FILE_CLUSTERS_GENES="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+RDS_DWUI="data/dwui/20221107-dwui-target-gene-kd6-essential.Rds"
+RDS_ZDWUI="data/dwui/20221107-zdwui-target-gene-kd6-essential.Rds"
+
+## output files
+FILE_OUT_AVG_TARGET="img/heatmap-kd6-essential-avg-target-clusters.pdf"
+FILE_OUT_AVG_GENE="img/heatmap-kd6-essential-avg-gene-clusters.pdf"
+FILE_OUT_AVG_BOTH="img/heatmap-kd6-essential-avg-both-clusters.pdf"
+FILE_OUT_FINAL="img/heatmap-kd6-essential-nnclusters-ordered.pdf"
+
+## aesthetics
+NCOLORS=100
+COLORS_BWR <- colorRampPalette(c("blue", "white", "red"))(NCOLORS)
+COLORS_MKY <- colorRampPalette(c("magenta", "black", "yellow"))(NCOLORS)
+COLORS_YKM <- colorRampPalette(c("yellow", "black", "magenta"))(NCOLORS)
+COLORS_RKG <- colorRampPalette(c("red", "black", "green"))(NCOLORS)
+breaks_dwui <- seq(-0.5, 0.5, length.out=NCOLORS + 1)
+breaks_zdwui <- seq(-4, 4, length.out=NCOLORS + 1)
+breaks_zdwui_broad <- seq(-6, 6, length.out=NCOLORS + 1)
+breaks_pca <- seq(-20, 20, length.out=NCOLORS + 1)
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+dwui_target_gene <- readRDS("data/dwui/20221107-dwui-target-gene-kd6-essential.Rds")
+dwui_target_gene[is.na(dwui_target_gene)] <- 0
+zdwui_target_gene <- readRDS("data/dwui/20221107-zdwui-target-gene-kd6-essential.Rds")
+zdwui_target_gene[is.na(zdwui_target_gene)] <- 0
+
+df_cluster_target <- read_csv(FILE_CLUSTERS_TARGETS) %>% 
+    mutate(cluster_id=factor(cluster_id, levels=sort(unique(cluster_id))))
+df_cluster_gene <- read_csv(FILE_CLUSTERS_GENES) %>% 
+    mutate(cluster_id=factor(cluster_id, levels=sort(unique(cluster_id))))
+```
+
+## Preprocessing
+
+```{r prepare_data}
+sgid2gene <- df_cluster_target %>%
+    dplyr::select(sgID_AB, target_gene) %>%
+    distinct(sgID_AB, target_gene) %>%
+    deframe()
+
+ens2gene <- df_cluster_gene %>%
+    dplyr::select(gene_id, gene_name) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+
+convert_rownames <- function (mat, in2out) {
+    mat %>% set_rownames(in2out[rownames(.)])
+}
+
+convert_colnames <- function (mat, in2out) {
+    mat %>% set_colnames(in2out[colnames(.)])
+}
+
+idx_targets1 <- df_cluster_target %>%
+    arrange(cluster_id, target_gene) %$%
+    sgID_AB
+
+idx_genes1 <- df_cluster_gene %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_genes_clean <- df_cluster_gene %>%
+    filter(!(cluster_id %in% CLUSTERS_GENE_UNREG)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+```
+
+# Compute Cluster Means
+## Target Clusters
+```{r compute_target_cluster_means}
+I_cluster_target <- df_cluster_target %>%
+    dplyr::select(sgID_AB, cluster_id) %>%
+    deframe %>% fac2sparse
+
+## cluster target means
+M_cluster_target <- I_cluster_target %>% { . / rowSums(.) }
+
+mzdwui_cluster_gene <- M_cluster_target[,idx_targets1] %*% zdwui_target_gene[idx_targets1,]
+mzdwui_cluster_gene %<>% as.matrix
+```
+
+### Plot Target Cluster Means
+```{r plt_hc_cluster_mzdwui, fig.width=8, fig.height=4}
+df_col_annots <- df_cluster_gene %>%
+    dplyr::select(gene_id, cluster_id) %>%
+    rename(gene_cluster=cluster_id) %>%
+    column_to_rownames("gene_id")
+
+pheatmap(mzdwui_cluster_gene[, idx_genes_clean], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=TRUE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=FALSE, clustering_method="complete",
+         cutree_rows=NA, cutree_cols=NA)
+```
+
+### Reordered Target Cluster Means
+```{r plt_ordered_cluster_mzdwui, fig.width=8, fig.height=6}
+idx_clusters_targets <- c(14,18,11,16,13,9,12,2,5,15,1,6,8,3,7,4,10,17)
+
+pheatmap(mzdwui_cluster_gene[idx_clusters_targets, idx_genes_clean], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         #annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=TRUE, scale='none', 
+         cluster_rows=FALSE, cluster_cols=FALSE, clustering_method="complete",
+         #gaps_row=cumsum(table(clusters_targets_final)),
+         #gaps_col=cumsum(table(clusters_genes_final)) %>% `[`(!duplicated(.)),
+         cutree_rows=NA, cutree_cols=NA)
+```
+
+### Reordered Target Clusters DWUI
+```{r plt_ordered_cluster_dwui, fig.width=8, fig.height=8}
+idx_targets2 <- df_cluster_target %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, target_gene) %$%
+    sgID_AB
+
+df_row_annots <- df_cluster_target %>%
+    dplyr::select(sgID_AB, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    rename(target_cluster=cluster_id) %>%
+    column_to_rownames("sgID_AB")
+
+pheatmap(zdwui_target_gene[idx_targets2, idx_genes_clean], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none',
+         cluster_rows=FALSE, cluster_cols=FALSE, clustering_method="complete")
+```
+
+## Gene Clusters
+```{r compute_gene_cluster_means}
+I_cluster_gene <- df_cluster_gene %>%
+    filter(!(cluster_id %in% CLUSTERS_GENE_UNREG)) %>%
+    dplyr::select(gene_id, cluster_id) %>%
+    deframe %>% fac2sparse
+
+## cluster target means
+M_cluster_gene <- I_cluster_gene %>% { . / rowSums(.) }
+
+mzdwui_target_cluster <- zdwui_target_gene[,idx_genes_clean] %*% t(M_cluster_gene[,idx_genes_clean])
+mzdwui_target_cluster %<>% as.matrix
+```
+
+### Plot Gene Cluster Means
+```{r plt_hc_cluster_gene_mzdwui, fig.width=5, fig.height=6}
+pheatmap(mzdwui_target_cluster[idx_targets2,], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=10, fontsize_row=10,
+         show_colnames=TRUE, show_rownames=FALSE, scale='none', 
+         angle_col=0, annotation_names_row=FALSE,
+         annotation_row=df_row_annots, 
+         cluster_rows=FALSE, cluster_cols=TRUE, clustering_method="complete", 
+         drop_levels=TRUE)
+```
+
+### Reordered Gene Cluster Means
+```{r plt_ordered_cluster_gene_mzdwui, fig.width=4, fig.height=8}
+idx_clusters_genes <- as.character(c(20,16,7,8,1,3,18,2,5,10,15,19,14,11,4,6,17))
+
+pheatmap(mzdwui_target_cluster[idx_targets2, idx_clusters_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=10, fontsize_row=10,
+         show_colnames=TRUE, show_rownames=FALSE, scale='none', 
+         annotation_row=df_row_annots, 
+         cluster_rows=FALSE, cluster_cols=FALSE, clustering_method="complete", 
+         drop_levels=TRUE)
+```
+
+### Reordered All Clusters DWUI
+```{r plt_ordered_clusters_all_dwui, fig.width=8, fig.height=8}
+idx_genes2 <- df_cluster_gene %>%
+    filter(!(cluster_id %in% CLUSTERS_GENE_UNREG)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+df_col_annots <- df_cluster_gene %>%
+    dplyr::select(gene_id, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    rename(gene_cluster=cluster_id) %>%
+    column_to_rownames("gene_id")
+
+gaps_col <- df_cluster_gene %>%
+    filter(!(cluster_id %in% CLUSTERS_GENE_UNREG)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_name) %$%
+    table(cluster_id) %>%
+    cumsum
+
+gaps_row <- df_cluster_target %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, target_gene) %$%
+    table(cluster_id) %>%
+    cumsum
+         
+pheatmap(zdwui_target_gene[idx_targets2, idx_genes2], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none',
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE, clustering_method="complete")
+```
+
+# Final Joint Plot
+```{r joint_plot, figure.width=16, fig.height=16}
+pheatmap(zdwui_target_gene[idx_targets2, idx_genes2], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none',
+         labels_row=sgid2gene[idx_targets2],
+         labels_col=ens2gene[idx_genes2],
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         filename=FILE_OUT_FINAL, width=16, height=16)
+```
+
+
+#### Export Clustered Targets
+```{r export_avg_target_dendro}
+pheatmap(mzdwui_cluster_gene[, idx_genes2], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         annotation_col=df_col_annots,
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         show_colnames=FALSE, show_rownames=TRUE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=FALSE, clustering_method="complete",
+         cutree_rows=NA, cutree_cols=NA, 
+         filename=FILE_OUT_AVG_TARGET, width=8, height=4)
+```
+
+#### Export Clustered Genes
+```{r export_avg_gene_dendro}
+pheatmap(mzdwui_target_cluster[idx_targets2,], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=10, fontsize_row=10,
+         show_colnames=TRUE, show_rownames=FALSE, scale='none', 
+         angle_col=0,
+         annotation_row=df_row_annots, 
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         cluster_rows=FALSE, cluster_cols=TRUE, clustering_method="complete", 
+         drop_levels=TRUE, 
+         filename=FILE_OUT_AVG_GENE, width=5, height=6)
+```
+
+
+### Double Average
+```{r plt_double_average, fig.width=5, fig.height=4}
+mzdwui_cluster_cluster <- M_cluster_target[,idx_targets2] %*% mzdwui_target_cluster[idx_targets2,]
+
+pheatmap(mzdwui_cluster_cluster, 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=10, fontsize_row=10,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none', 
+         angle_col=0,
+         cluster_rows=TRUE, cluster_cols=TRUE, clustering_method="complete")
+```
+
+### Export Double Average
+```{r export_double_average, fig.width=5, fig.height=4}
+pheatmap(mzdwui_cluster_cluster, 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=10, fontsize_row=10,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none', 
+         angle_col=0,
+         cluster_rows=TRUE, cluster_cols=TRUE, clustering_method="complete",
+         filename=FILE_OUT_AVG_BOTH, width=5, height=4)
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

@@ -1,0 +1,206 @@
+---
+title: "Clustering on KD6 Essential Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We perform clustering of features and perturbations to identify isoforms that exhibit
+similar perturbation outcomes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(cowplot)
+library(plotly)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(pheatmap)
+library(dbscan)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## filtering options
+## number of cells in perturbation
+MIN_CELLS=30
+## max NTPs with NA WUI
+MAX_NTP_NA=0.20
+## min avg TPM in NTPs
+MIN_MEAN_TPM=20
+
+## input files
+FILE_SE_WUI="tbl/df_wui_kd6_essential_ui10.Rds"
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_wui <- readRDS(FILE_SE_WUI)
+```
+
+## Preprocessing
+
+```{r prepare_data}
+sgid2gene <- df_wui %>%
+    dplyr::select(sgID_AB, target_gene) %>%
+    distinct(sgID_AB, target_gene) %>%
+    deframe()
+
+ens2gene <- df_wui %>%
+    dplyr::select(gene_id, gene_name) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+    
+df_ntp <- filter(df_wui, target_gene == 'non-targeting') %>%
+    group_by(gene_id, gene_name) %>%
+    filter(mean(is.na(wui)) <= MAX_NTP_NA) %>%
+    filter(mean(tpm) >= MIN_MEAN_TPM) %>%
+    filter(!is.na(wui)) %>%
+    summarize(mean_wui=weighted.mean(wui, n_cells), .groups='drop',
+              sd_wui=sqrt(sum((wui-mean_wui)^2)/n()))
+
+df_dwui <- df_wui %>%
+    filter(target_gene != 'non-targeting',
+           n_cells >= MIN_CELLS) %>%
+    inner_join(df_ntp, by=c("gene_id", "gene_name")) %>%
+    mutate(dwui=wui-mean_wui) %>%
+    dplyr::select(gene_id, sgID_AB, wui, dwui)
+
+wui_gene_target <- df_dwui %>%
+    dplyr::select(gene_id, sgID_AB, wui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="wui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix
+
+dwui_gene_target <- df_dwui %>%
+    dplyr::select(gene_id, sgID_AB, dwui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="dwui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix %>%
+    set_colnames(sgid2gene[colnames(.)]) %>% set_rownames(ens2gene[rownames(.)])
+```
+
+
+```{r heatmap, fig.width=20, fig.height=20}
+NCOLORS=100
+breaks.point <- seq(-4, 4, length.out=NCOLORS + 1)
+
+pheatmap(dwui_gene_target, 
+         color=colorRampPalette(c("red", "white", "blue"))(NCOLORS),
+         breaks=breaks.point, fontsize_col=1, fontsize_row=1,
+         treeheight_col=0, treeheight_row=0,
+         show_colnames=TRUE, show_rownames=TRUE, scale='row', 
+         filename="img/heatmap-kd6-essential-clustering.pdf", width=24, height=24)
+```
+
+
+```{r hclust}
+zdwui_gene_target <- t(dwui_gene_target) %>% scale(center=FALSE) %>% t()
+
+dist_targets <- dist(t(zdwui_gene_target))
+
+res <- hclust(dist_targets)
+```
+
+```{r fig.width=24, fig.height=4}
+pdf("img/dendro-kd6-essential-targets.pdf", width=36, height=4)
+plot(res, cex=0.1)
+dev.off()
+```
+
+
+```{r}
+dend <- cut(as.dendrogram(res), h=100)
+```
+
+```{r fig.width=4, fig.height=24}
+pheatmap(t(zdwui_gene_target[,res$order]), 
+         color=colorRampPalette(c("red", "white", "blue"))(NCOLORS),
+         breaks=breaks.point, treeheight_col=0, fontsize_row=1,
+         show_rownames=TRUE, show_colnames=FALSE, scale='none', cluster_rows=FALSE, 
+         filename="img/heatmap-kd6-essential-dendro-matched.pdf", width=4, height=24)
+```
+
+## HDBSCAN
+```{r hdbscan, fig.width=4, fig.height=24}
+res_hdbscan <- hdbscan(dist_targets, minPts=2)
+pheatmap(t(zdwui_gene_target[,res_hdbscan$hc$order]), 
+         color=colorRampPalette(c("red", "white", "blue"))(NCOLORS),
+         breaks=breaks.point, treeheight_col=0, fontsize_row=1,
+         show_rownames=TRUE, show_colnames=FALSE, scale='none', cluster_rows=FALSE, 
+         filename="img/heatmap-kd6-essential-hdbscan-clustering.pdf", width=4, height=24)
+```
+
+## High Variance Only
+```{r fig.width=20, fig.height=20}
+idx_targets_high <- colSums(abs(zdwui_gene_target) > 3, na.rm=TRUE) %>% order(decreasing=TRUE)
+idx_genes_high <- rowSums(abs(zdwui_gene_target[,idx_targets_high[1:500]]) > 3, na.rm=TRUE) %>% order(decreasing=TRUE)
+
+pheatmap(t(zdwui_gene_target[idx_genes_high[1:500], idx_targets_high[1:500]]), 
+         color=colorRampPalette(c("red", "white", "blue"))(NCOLORS),
+         breaks=breaks.point, fontsize_col=1, fontsize_row=1,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE, 
+         filename="img/heatmap-kd6-essential-var500.pdf", width=12, height=12)
+```
+
+
+```{r pca}
+zdwui_clean <- zdwui_gene_target
+zdwui_clean[is.na(zdwui_clean)] <- 0
+mat <- BiocSingular::runPCA(t(zdwui_clean), rank=30, center=FALSE)
+```
+
+```{r plt_pca, fig.width=4, fig.height=20}
+breaks_pca <- seq(-40, 40, length.out=NCOLORS + 1)
+pheatmap(mat$x, 
+         color=colorRampPalette(c("red", "white", "blue"))(NCOLORS),
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=TRUE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE, 
+         filename="img/heatmap-kd6-essential-pca30-clustering.pdf", width=4, height=24)
+
+pheatmap(mat$x[,1:10], 
+         color=colorRampPalette(c("red", "white", "blue"))(NCOLORS),
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=TRUE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE, 
+         filename="img/heatmap-kd6-essential-pca10-clustering.pdf", width=4, height=24)
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

@@ -1,0 +1,191 @@
+---
+title: "Compare Clusterings"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We compare the clusters of perturbations and clusters of regulated genes across 
+the different experiments. We would expect that all genes that appear regulated 
+in the essential K562 screen also are found to be regulated in the GWPS screen in 
+the same cell type. Across the K562 and Rpe1 experiments, we would ideally expect
+that all regulating perturbations are found in both, and have similar clusterings.
+Since many multi-UTR genes are ubiquitously expressed, we would also expect strong 
+overlaps in the regulated multi-UTR genes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(ggalluvial)
+library(cowplot)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+CSV_TARGETS_KD6="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+CSV_TARGETS_RD7="tbl/df_target_nnclusters_rd7_essential_ui10.csv"
+CSV_TARGETS_KD8="tbl/df_target_nnclusters_kd8_gwps_ui10.csv"
+
+CSV_IPA_TARGETS_KD6="tbl/df_target_ipa_clusters_kd6_essential_ui10.csv"
+```
+
+## Functions
+
+```{r methods}
+
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_targets_kd6 <- read_csv(CSV_TARGETS_KD6, col_types='ccci')
+df_targets_rd7 <- read_csv(CSV_TARGETS_RD7, col_types='ccci')
+df_targets_kd8 <- read_csv(CSV_TARGETS_KD8, col_types='ccci')
+df_ipa_kd6 <- read_csv(CSV_IPA_TARGETS_KD6, col_types='ccci')
+```
+
+
+# Analysis
+
+## Alluvial Plots
+### Rpe1 Essential to K562 Essential
+```{r alv_rd7_kd6, fig.width=8, fig.height=8}
+bind_rows(mutate(df_targets_kd6, experiment="K562 Essential"),
+          mutate(df_targets_rd7, experiment="Rpe1 Essential")) %>%
+    mutate(cluster_id=factor(cluster_id)) %>%
+    ggplot(aes(x=experiment, stratum=cluster_id, alluvium=sgID_AB, label=cluster_id)) +
+    geom_flow(aes(fill=cluster_id), width=0.2) +
+    geom_stratum(fill='lightgrey', alpha=0.2, width=0.2) +
+    geom_text(stat='stratum') +
+    scale_x_discrete(limits = c("Rpe1 Essential", "K562 Essential"), expand = c(0.1, 0.05)) +
+    scale_y_continuous(expand=c(0,0)) +
+    #scale_fill_manual(values=colors) +
+    labs(x="Experiment", y="Pertubations") +
+    guides(fill=FALSE) +
+    theme_cowplot()
+```
+
+### K562 Essential to Rpe1 Essential
+```{r alv_kd6_rd7, fig.width=8, fig.height=8}
+bind_rows(mutate(df_targets_kd6, experiment="K562 Essential"),
+          mutate(df_targets_rd7, experiment="Rpe1 Essential")) %>%
+    mutate(cluster_id=factor(cluster_id)) %>%
+    ggplot(aes(x=experiment, stratum=cluster_id, alluvium=sgID_AB, label=cluster_id)) +
+    geom_flow(aes(fill=cluster_id), width=0.2) +
+    geom_stratum(fill='lightgrey', alpha=0.2, width=0.2) +
+    geom_text(stat='stratum') +
+    scale_x_discrete(limits = c("K562 Essential", "Rpe1 Essential"), expand = c(0.1, 0.05)) +
+    scale_y_continuous(expand=c(0,0)) +
+    #scale_fill_manual(values=colors) +
+    labs(x="Experiment", y="Pertubations") +
+    guides(fill=FALSE) +
+    theme_cowplot()
+```
+
+### K562 GWPS to K562 Essential
+```{r alv_kd8_kd6, fig.width=8, fig.height=8}
+bind_rows(mutate(df_targets_kd6, experiment="K562 Essential"),
+          mutate(df_targets_kd8, experiment="K562 Genome-Wide")) %>%
+    mutate(cluster_id=factor(cluster_id)) %>%
+    ggplot(aes(x=experiment, stratum=cluster_id, alluvium=sgID_AB, label=cluster_id)) +
+    geom_flow(aes(fill=cluster_id), width=0.2) +
+    geom_stratum(fill='lightgrey', alpha=0.2, width=0.2) +
+    geom_text(stat='stratum') +
+    scale_x_discrete(limits = c("K562 Genome-Wide", "K562 Essential"), expand = c(0.1, 0.05)) +
+    scale_y_continuous(expand=c(0,0)) +
+    #scale_fill_manual(values=colors) +
+    labs(x="Experiment", y="Pertubations") +
+    guides(fill=FALSE) +
+    theme_cowplot()
+```
+
+### K562 Essential to K562 GWPS
+```{r alv_kd6_kd8, fig.width=8, fig.height=8}
+bind_rows(mutate(df_targets_kd6, experiment="K562 Essential"),
+          mutate(df_targets_kd8, experiment="K562 Genome-Wide")) %>%
+    mutate(cluster_id=factor(cluster_id)) %>%
+    ggplot(aes(x=experiment, stratum=cluster_id, alluvium=sgID_AB, label=cluster_id)) +
+    geom_flow(aes(fill=cluster_id), width=0.2) +
+    geom_stratum(fill='lightgrey', alpha=0.2, width=0.2) +
+    geom_text(stat='stratum') +
+    scale_x_discrete(limits = c("K562 Essential", "K562 Genome-Wide"), expand = c(0.1, 0.05)) +
+    scale_y_continuous(expand=c(0,0)) +
+    #scale_fill_manual(values=colors) +
+    labs(x="Experiment", y="Pertubations") +
+    guides(fill=FALSE) +
+    theme_cowplot()
+```
+
+
+# IPA vs WUI Target Clusters
+### K562 Essential - IPA to WUI
+```{r alv_ipa_wui_kd6, fig.width=8, fig.height=8}
+bind_rows(mutate(df_ipa_kd6, experiment="IPA"),
+          mutate(df_targets_kd6, experiment="WUI")) %>%
+    mutate(cluster_id=factor(cluster_id)) %>%
+    ggplot(aes(x=experiment, stratum=cluster_id, alluvium=sgID_AB, label=cluster_id)) +
+    geom_flow(aes(fill=cluster_id), width=0.2) +
+    geom_stratum(fill='lightgrey', alpha=0.2, width=0.2) +
+    geom_text(stat='stratum') +
+    scale_x_discrete(limits = c("IPA", "WUI"), expand = c(0.1, 0.05)) +
+    scale_y_continuous(expand=c(0,0)) +
+    #scale_fill_manual(values=colors) +
+    labs(x="Experiment", y="Pertubations") +
+    guides(fill=FALSE) +
+    theme_cowplot()
+```
+
+### K562 Essential - WUI to IPA
+```{r alv_wui_ipa_kd6, fig.width=8, fig.height=8}
+bind_rows(mutate(df_targets_kd6, experiment="WUI"),
+          mutate(df_ipa_kd6, experiment="IPA")) %>%
+    mutate(cluster_id=factor(cluster_id)) %>%
+    ggplot(aes(x=experiment, stratum=cluster_id, alluvium=sgID_AB, label=cluster_id)) +
+    geom_flow(aes(fill=cluster_id), width=0.2) +
+    geom_stratum(fill='lightgrey', alpha=0.2, width=0.2) +
+    geom_text(stat='stratum') +
+    scale_x_discrete(limits = c("WUI", "IPA"), expand = c(0.1, 0.05)) +
+    scale_y_continuous(expand=c(0,0)) +
+    #scale_fill_manual(values=colors) +
+    labs(x="Experiment", y="Pertubations") +
+    guides(fill=FALSE) +
+    theme_cowplot()
+```
+
+# Conclusion
+
+It appears rather confused between the different experiments. The IPA-WUI clusters
+look rather coherent.
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

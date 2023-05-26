@@ -1,0 +1,341 @@
+---
+title: "PCA-Filtered Clustering on KD8 GWPS Data"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We perform clustering of features and perturbations to identify isoforms that exhibit
+similar perturbation outcomes.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## filtering options
+## number of cells in perturbation
+MIN_CELLS=30
+## max NTPs with NA WUI
+MAX_NTP_NA=0.20
+## min avg TPM in NTPs
+MIN_MEAN_TPM=20
+
+N_GENE_PCS=11
+FRACTION_VAR=0.4
+
+## input files
+FILE_SE_WUI="tbl/df_wui_kd8_gwps_ui10.Rds"
+
+## output files
+FILE_OUT_TARGETS="tbl/df_target_clusters_hc_kd8_gwps_ui10.csv"
+FILE_OUT_GENES="tbl/df_gene_clusters_hc_kd8_gwps_ui10.csv"
+
+## aesthetics
+NCOLORS=100
+COLORS_BWR <- colorRampPalette(c("blue", "white", "red"))(NCOLORS)
+COLORS_MKY <- colorRampPalette(c("magenta", "black", "yellow"))(NCOLORS)
+COLORS_YKM <- colorRampPalette(c("yellow", "black", "magenta"))(NCOLORS)
+COLORS_RKG <- colorRampPalette(c("red", "black", "green"))(NCOLORS)
+breaks_dwui <- seq(-0.5, 0.5, length.out=NCOLORS + 1)
+breaks_zdwui <- seq(-4, 4, length.out=NCOLORS + 1)
+breaks_zdwui_broad <- seq(-6, 6, length.out=NCOLORS + 1)
+breaks_pca <- seq(-20, 20, length.out=NCOLORS + 1)
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_wui <- readRDS(FILE_SE_WUI)
+```
+
+## Preprocessing
+
+```{r prepare_data}
+sgid2gene <- df_wui %>%
+    dplyr::select(sgID_AB, target_gene) %>%
+    distinct(sgID_AB, target_gene) %>%
+    deframe()
+
+ens2gene <- df_wui %>%
+    dplyr::select(gene_id, gene_name) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+
+convert_rownames <- function (mat, in2out) {
+    mat %>% set_rownames(in2out[rownames(.)])
+}
+
+convert_colnames <- function (mat, in2out) {
+    mat %>% set_colnames(in2out[colnames(.)])
+}
+
+df_ntp <- filter(df_wui, target_gene == 'non-targeting') %>%
+    group_by(gene_id, gene_name) %>%
+    filter(mean(is.na(wui)) <= MAX_NTP_NA) %>%
+    filter(mean(tpm) >= MIN_MEAN_TPM) %>%
+    filter(!is.na(wui)) %>%
+    summarize(mean_wui=weighted.mean(wui, n_cells), .groups='drop',
+              sd_wui=sqrt(sum((wui-mean_wui)^2)/n()))
+
+df_dwui <- df_wui %>%
+    filter(target_gene != 'non-targeting',
+           n_cells >= MIN_CELLS) %>%
+    inner_join(df_ntp, by=c("gene_id", "gene_name")) %>%
+    mutate(dwui=wui-mean_wui) %>%
+    dplyr::select(gene_id, sgID_AB, wui, dwui)
+
+wui_gene_target <- df_dwui %>%
+    dplyr::select(gene_id, sgID_AB, wui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="wui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix
+
+dwui_gene_target <- df_dwui %>%
+    dplyr::select(gene_id, sgID_AB, dwui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="dwui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix 
+
+zdwui_gene_target <- t(dwui_gene_target) %>% scale(center=FALSE) %>% t()
+
+zdwui_gene_target_clean <- zdwui_gene_target
+zdwui_gene_target_clean[is.na(zdwui_gene_target_clean)] <- 0
+```
+
+# PCA
+## Compute PCA 
+```{r pc_genes}
+res_pca <- BiocSingular::runPCA(t(zdwui_gene_target_clean), rank=30, center=FALSE)
+mat_pca <- res_pca$x
+```
+
+## Heatmap - All Components
+```{r plt_pca30, fig.width=4, fig.height=8}
+pheatmap(mat_pca, 
+         color=COLORS_BWR,
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE)
+```
+
+### Heatmap - PC1-PC10 with Cluster Cuts
+```{r plt_pca10_k33, fig.width=4, fig.height=8}
+pheatmap(mat_pca[,1:10], 
+         color=COLORS_BWR,
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE, 
+         cutree_rows=50)
+```
+
+### Export Heatmap
+```{r export_plt_pca10_k33, fig.width=4, fig.height=8}
+pheatmap(convert_rownames(mat_pca[,1:10], sgid2gene), 
+         color=COLORS_BWR,
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=TRUE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE, 
+         cutree_rows=50,
+         filename="img/heatmap-kd8-gwps-pca10-k50.pdf", width=4, height=24)
+```
+
+# Compute Target Clusters
+```{r target_cluster}
+dist_targets <- dist(mat_pca[,1:10])
+#dist_targets <- as.dist((1-cor(t(mat_pca)))/2)
+hc_targets <- hclust(dist_targets, method="complete")
+
+clusters_targets <- cutree(hc_targets, k=50)
+
+table(clusters_targets)
+```
+
+### Export Target Clusters
+```{r export_target_clusters}
+df_wui %>%
+    distinct(target_gene, target_gene_id, sgID_AB) %>%
+    inner_join(enframe(clusters_targets, name="sgID_AB", value="cluster_id"), by="sgID_AB") %>%
+    write_csv(FILE_OUT_TARGETS)
+```
+
+## Z-DWUI Plot
+### Possible Noise Clusters Only
+We suspect the largest two cluster are mostly noise, so we want to check this in the 
+DWUI representation.
+
+#### Cluster 1
+```{r plt_noise_target_cluster1_zdwui, fig.width=8, fig.height=8}
+idx_cluster <- clusters_targets %>% `[`(. == 1) %>% names()
+pheatmap(t(zdwui_gene_target[,idx_cluster]), 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE)
+```
+
+#### Cluster 2
+```{r plt_noise_target_cluster2_zdwui, fig.width=8, fig.height=8}
+idx_cluster <- clusters_targets %>% `[`(. == 2) %>% names()
+pheatmap(t(zdwui_gene_target[,idx_cluster]), 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE)
+```
+
+Yes, these both look like white noise.
+
+### All Other Clusters
+
+```{r plt_signal_target_clusters_zdwui, fig.width=8, fig.height=8}
+idx_cluster <- clusters_targets %>% `[`(!(. %in% 1:2)) %>% names()
+pheatmap(t(zdwui_gene_target[,idx_cluster]), 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE)
+```
+
+This looks good. Now we need to eliminate the noise columns (readout genes).
+
+# Cluster Response Genes
+## Reduced PCA
+```{r pc_targets}
+idx_signal_targets <- clusters_targets %>% `[`(!(. %in% 1:2)) %>% names()
+res_pca2 <- BiocSingular::runPCA(t(zdwui_gene_target_clean[,idx_signal_targets]), rank=30, center=FALSE)
+mat_pca2 <- res_pca2$x
+```
+
+```{r plt_pca_reduced_all, fig.width=4, fig.height=4}
+pheatmap(mat_pca2, 
+         color=COLORS_BWR,
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE,
+         cutree_rows=60)
+```
+
+```{r plt_pca_reduced_subset, fig.width=4, fig.height=4}
+pheatmap(mat_pca2[,seq(N_GENE_PCS)], 
+         color=COLORS_BWR,
+         breaks=breaks_pca, 
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE,
+         cutree_rows=50)
+```
+
+## PC Loadings
+```{r select_gene_loadings}
+get_top_loading_genes <- function (idx_pc, frac=0.5) {
+    res_pca2$rotation[,idx_pc] %>%
+        { .^2 } %>% { . / sum(.) } %>%
+        sort(decreasing=TRUE) %>%
+        cumsum %>%
+        `[`(. < frac) %>%
+        names
+}
+
+idx_signal_genes <- lapply(seq(N_GENE_PCS), 
+                           get_top_loading_genes, 
+                           frac=FRACTION_VAR) %>% unlist %>% unique
+```
+
+We identify `r length(idx_signal_genes)` genes as coherent response genes.
+
+```{r plt_signal_gene_clusters_zdwui, fig.width=8, fig.height=8}
+pheatmap(t(zdwui_gene_target[idx_signal_genes, idx_signal_targets]), 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none', 
+         cluster_rows=TRUE, cluster_cols=TRUE, clustering_method="complete",
+         cutree_rows=NA, cutree_cols=20)
+```
+
+# Compute Gene Clusters
+```{r gene_cluster}
+dist_genes <- dist(zdwui_gene_target[idx_signal_genes, idx_signal_targets])
+
+hc_genes <- hclust(dist_genes, method="complete")
+
+clusters_genes <- cutree(hc_genes, k=20)
+
+table(clusters_genes)
+```
+
+### Export Gene Clusters
+```{r export_gene_clusters}
+df_wui %>%
+    distinct(gene_name, gene_id) %>%
+    inner_join(enframe(clusters_genes, name="gene_id", value="cluster_id"), by="gene_id") %>%
+    write_csv(FILE_OUT_GENES)
+```
+
+
+# Final Joint Plot
+```{r joint_plot, figure.width=12, fig.height=24}
+df_target_annots <- enframe(clusters_targets, name="sgID_AB", value="target_cluster") %>%
+    mutate(target_cluster=factor(target_cluster)) %>%
+    column_to_rownames("sgID_AB")
+
+df_gene_annots <- enframe(clusters_genes, name="gene_id", value="gene_cluster") %>%
+    mutate(gene_cluster=factor(gene_cluster)) %>%
+    column_to_rownames("gene_id")
+
+pheatmap(t(zdwui_gene_target[idx_signal_genes, idx_signal_targets]), 
+         color=COLORS_YKM,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none', 
+         annotation_row=df_target_annots, annotation_col=df_gene_annots,
+         labels_row=sgid2gene[colnames(zdwui_gene_target[,idx_signal_targets])],
+         labels_col=ens2gene[rownames(zdwui_gene_target[idx_signal_genes,])],
+         cluster_rows=TRUE, cluster_cols=TRUE, clustering_method="complete",
+         filename="img/heatmap-kd6-essential-clusters-labeled.pdf", width=12, height=24)
+```
+
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

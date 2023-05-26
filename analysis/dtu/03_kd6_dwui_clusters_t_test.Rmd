@@ -1,0 +1,164 @@
+---
+title: "Differential WUI Per Cluster - t Test"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Run differential WUI testing by clusters against non-targeting perturbations.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(BiocParallel)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+MIN_TPM=5
+
+FILE_CLUSTERS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+FILE_WUI="tbl/df_wui_kd6_essential_ui10.Rds"
+
+FILE_OUT="data/dwui/df_dwui_kd6_clusters.t_test.tsv.gz"
+
+register(MulticoreParam(8))
+```
+
+## Functions
+
+```{r methods}
+
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_wui <- readRDS(FILE_WUI) %>%
+    filter(!is.na(wui)) %>%
+    dplyr::select(-c("tpm_su", "tpm_lu", "pct_ipa"))
+
+df_clusters <- read_csv(FILE_CLUSTERS) %>%
+    mutate(cluster_id=as.character(cluster_id))
+
+df_ntp <- filter(df_wui, str_detect(sgID_AB, '^non-targeting')) %>%
+    mutate(cluster_id="ntp")
+
+wui_clusters <- left_join(df_clusters, df_wui,
+                          by=c("target_gene", "target_gene_id", "sgID_AB")) %>%
+    split(.$cluster_id)
+```
+
+## Preprocessing
+```{r prepare_data}
+df_tests <- bplapply(wui_clusters, function (df_cluster) {
+    cid <- unique(df_cluster$cluster_id)
+    bind_rows(df_ntp, df_cluster) %>%
+        group_by(gene_id, gene_name) %>%
+        filter(!all(tpm_gene == 0),
+               sum(cluster_id == 'ntp') > 1,
+               sum(cluster_id != 'ntp') > 1) %>%
+        nest() %>%
+        mutate(mean_tpm_ntp=map_dbl(data, ~ mean(.x$tpm_gene[.x$cluster_id == "ntp"])),
+               sd_tpm_ntp=map_dbl(data, ~ sd(.x$tpm_gene[.x$cluster_id == "ntp"])),
+               mean_tpm_cluster=map_dbl(data, ~ mean(.x$tpm_gene[.x$cluster_id != "ntp"])),
+               sd_tpm_cluster=map_dbl(data, ~ sd(.x$tpm_gene[.x$cluster_id != "ntp"])),
+               mean_wui_ntp=map_dbl(data, ~ mean(.x$wui[.x$cluster_id == "ntp"])),
+               sd_wui_ntp=map_dbl(data, ~ sd(.x$wui[.x$cluster_id == "ntp"])),
+               mean_wui_cluster=map_dbl(data, ~ mean(.x$wui[.x$cluster_id != "ntp"])),
+               sd_wui_cluster=map_dbl(data, ~ sd(.x$wui[.x$cluster_id != "ntp"])),
+               dwui=mean_wui_cluster - mean_wui_ntp,
+               l2fc=log2(mean_tpm_cluster/mean_tpm_ntp)) %>%
+        filter(mean_tpm_ntp >= MIN_TPM, mean_tpm_cluster >= MIN_TPM) %>%
+        mutate(test=map(data, ~ tidy(t.test(wui ~ cluster_id, data=.x))),
+               data=NULL, cluster_id=cid) %>%
+        unnest(test) %>%
+        select(-c("method", "alternative", "estimate", "estimate1", "estimate2", 
+                  "parameter", "conf.low", "conf.high")) %>%
+        ungroup() %>%
+        mutate(p.adj=p.adjust(p.value, method="BH")) %>%
+        arrange(p.value)
+}) %>% bind_rows()
+```
+
+### Export
+```{r export_dge}
+write_tsv(df_tests, FILE_OUT)
+```
+
+# Analysis
+
+## Number of Significant Genes
+
+```{r plt_nsig, fig.width=6, fig.height=4}
+df_tests %>%
+    group_by(cluster_id) %>%
+    summarize(n_sig=sum(p.adj < 0.05), .groups='drop') %>%
+    ggplot(aes(x=factor(as.numeric(cluster_id)), y=n_sig)) +
+    geom_bar(stat='identity', fill='grey90', color='black') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    labs(x="Cluster", y="Number of Significant Genes (FDR < 0.05)") +
+    theme_bw()
+    
+df_tests %>%
+    group_by(cluster_id) %>%
+    summarize(n_sig=sum(p.adj < 0.05 & abs(dwui) >= 0.05), .groups='drop') %>%
+    ggplot(aes(x=factor(as.numeric(cluster_id)), y=n_sig)) +
+    geom_bar(stat='identity', fill='grey90', color='black') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    labs(x="Cluster", y="Significant Genes (FDR < 0.05, |dWUI| > 0.05)") +
+    theme_bw()
+    
+df_tests %>%
+    group_by(cluster_id) %>%
+    summarize(n_sig=sum(p.adj < 0.05 & abs(dwui) >= 0.1), .groups='drop') %>%
+    ggplot(aes(x=factor(as.numeric(cluster_id)), y=n_sig)) +
+    geom_bar(stat='identity', fill='grey90', color='black') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    labs(x="Cluster", y="Significant Genes (FDR < 0.05, |dWUI| > 0.10)") +
+    theme_bw()
+```
+
+# Conclusion
+
+<!--
+What was found?
+Clearly state conclusions.
+Was there anything unexpected?
+Are there unanswered questions?
+What should be worked on next?
+-->
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

@@ -1,0 +1,374 @@
+---
+title: "Heatmap Replication"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We are interested if the same ordering of perturbations and regulated genes shows
+a similar pattern as that derived from processing the K562 essential screen data.
+That is, instead of calling new clusters on the GWPS and Rpe1 experiments, let's
+assume the same clusters and see if they look coherent.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+library(SummarizedExperiment)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## input files
+FILE_RD7_WUI="tbl/df_wui_rd7_essential_ui10.Rds"
+FILE_KD8_WUI="tbl/df_wui_kd8_gwps_ui10.Rds"
+
+CSV_TARGETS_KD6="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+CSV_GENES_KD6="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+NULL_CLUSTERS=as.character(c(9,12,13))
+
+idx_clusters_targets <- as.character(c(14,18,11,16,13,9,12,2,5,15,1,6,8,3,7,4,10,17))
+idx_clusters_genes <- as.character(c(20,16,7,8,1,3,18,2,5,10,15,19,14,11,4,6,17))
+
+
+## output files
+FILE_OUT_RD7_FINAL="img/heatmap-rd7-essential-using-rd6-clusters.pdf"
+FILE_OUT_KD8_FINAL="img/heatmap-kd8-gwps-using-rd6-clusters.pdf"
+
+## aesthetics
+NCOLORS=100
+COLORS_BWR <- colorRampPalette(c("blue", "white", "red"))(NCOLORS)
+COLORS_MKY <- colorRampPalette(c("magenta", "black", "yellow"))(NCOLORS)
+COLORS_YKM <- colorRampPalette(c("yellow", "black", "magenta"))(NCOLORS)
+COLORS_RKG <- colorRampPalette(c("red", "black", "green"))(NCOLORS)
+breaks_dwui <- seq(-0.5, 0.5, length.out=NCOLORS + 1)
+breaks_zdwui <- seq(-4, 4, length.out=NCOLORS + 1)
+breaks_zdwui_broad <- seq(-6, 6, length.out=NCOLORS + 1)
+breaks_pca <- seq(-20, 20, length.out=NCOLORS + 1)
+```
+
+# RD7
+## Loading Data
+```{r load_data_rd7, message=FALSE}
+df_targets_kd6 <- read_csv(CSV_TARGETS_KD6, col_types='cccc')
+df_genes_kd6 <- read_csv(CSV_GENES_KD6, col_types='ccc')
+
+df_wui_rd7 <- readRDS(FILE_RD7_WUI)
+```
+
+## Preprocessing
+
+```{r prepare_data_rd7}
+sgid2gene <- df_wui_rd7 %>%
+    dplyr::select(sgID_AB, target_gene) %>%
+    distinct(sgID_AB, target_gene) %>%
+    deframe()
+
+ens2gene <- df_wui_rd7 %>%
+    dplyr::select(gene_id, gene_name) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+
+convert_rownames <- function (mat, in2out) {
+    mat %>% set_rownames(in2out[rownames(.)])
+}
+
+convert_colnames <- function (mat, in2out) {
+    mat %>% set_colnames(in2out[colnames(.)])
+}
+
+df_ntp_rd7 <- filter(df_wui_rd7, 
+                     target_gene == "non-targeting",
+                     gene_id %in% df_genes_kd6$gene_id) %>%
+    group_by(gene_id, gene_name) %>%
+    filter(!is.na(wui)) %>%
+    summarize(mean_wui=weighted.mean(wui, n_cells), .groups='drop',
+              sd_wui=sqrt(sum((wui-mean_wui)^2)/n()))
+
+df_dwui_rd7 <- df_wui_rd7 %>%
+    filter(sgID_AB %in% df_targets_kd6$sgID_AB,
+           gene_id %in% df_genes_kd6$gene_id) %>%
+    inner_join(df_ntp_rd7, by=c("gene_id", "gene_name")) %>%
+    mutate(dwui=wui-mean_wui) %>%
+    dplyr::select(gene_id, sgID_AB, wui, dwui)
+
+wui_gene_target_rd7 <- df_dwui_rd7 %>%
+    dplyr::select(gene_id, sgID_AB, wui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="wui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix
+
+dwui_gene_target_rd7 <- df_dwui_rd7 %>%
+    dplyr::select(gene_id, sgID_AB, dwui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="dwui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix 
+
+zdwui_target_gene_rd7 <- t(dwui_gene_target_rd7) %>% scale(center=FALSE)
+```
+
+## Clusters Indices
+```{r cluster_idx_rd7}
+idx_genes <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_rd7),
+           cluster_id %in% idx_clusters_genes) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_genes_null <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_rd7),
+           cluster_id %in% NULL_CLUSTERS) %>%
+    mutate(cluster_id=factor(cluster_id, levels=NULL_CLUSTERS)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_targets <- df_targets_kd6 %>%
+    filter(sgID_AB %in% rownames(zdwui_target_gene_rd7)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, target_gene) %$%
+    sgID_AB
+
+df_col_annots <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_rd7),
+           cluster_id %in% idx_clusters_genes) %>%
+    dplyr::select(gene_id, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    dplyr::rename(gene_cluster=cluster_id) %>%
+    column_to_rownames("gene_id")
+
+df_row_annots <- df_targets_kd6 %>%
+    filter(sgID_AB %in% rownames(zdwui_target_gene_rd7)) %>%
+    dplyr::select(sgID_AB, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    dplyr::rename(target_cluster=cluster_id) %>%
+    column_to_rownames("sgID_AB")
+
+gaps_col <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_rd7),
+           cluster_id %in% idx_clusters_genes) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_id) %$%
+    table(cluster_id) %>%
+    cumsum
+
+gaps_row <- df_targets_kd6 %>%
+    filter(sgID_AB %in% rownames(zdwui_target_gene_rd7)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, sgID_AB) %$%
+    table(cluster_id) %>%
+    cumsum
+```
+
+
+## Heatmap
+```{r plt_ordered_rd7, fig.width=8, fig.height=8}
+pheatmap(zdwui_target_gene_rd7[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none',
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE)
+```
+
+### Export Plot
+```{r export_rd7_heatmap}
+pheatmap(zdwui_target_gene_rd7[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none',
+         labels_row=sgid2gene[idx_targets],
+         labels_col=ens2gene[idx_genes],
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         filename=FILE_OUT_RD7_FINAL, width=16, height=16)
+```
+
+
+
+# KD8 GWPS
+## Loading Data
+```{r load_data_kd8, message=FALSE}
+df_wui_kd8 <- readRDS(FILE_KD8_WUI)
+```
+
+## Preprocessing
+
+```{r prepare_data_kd8}
+sgid2gene <- df_wui_kd8 %>%
+    dplyr::select(sgID_AB, target_gene) %>%
+    distinct(sgID_AB, target_gene) %>%
+    deframe()
+
+ens2gene <- df_wui_kd8 %>%
+    dplyr::select(gene_id, gene_name) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+
+convert_rownames <- function (mat, in2out) {
+    mat %>% set_rownames(in2out[rownames(.)])
+}
+
+convert_colnames <- function (mat, in2out) {
+    mat %>% set_colnames(in2out[colnames(.)])
+}
+
+df_ntp_kd8 <- filter(df_wui_kd8, 
+                     target_gene == "non-targeting",
+                     gene_id %in% df_genes_kd6$gene_id) %>%
+    group_by(gene_id, gene_name) %>%
+    filter(!is.na(wui)) %>%
+    summarize(mean_wui=weighted.mean(wui, n_cells), .groups='drop',
+              sd_wui=sqrt(sum((wui-mean_wui)^2)/n()))
+
+df_dwui_kd8 <- df_wui_kd8 %>%
+    filter(sgID_AB %in% df_targets_kd6$sgID_AB,
+           gene_id %in% df_genes_kd6$gene_id) %>%
+    inner_join(df_ntp_kd8, by=c("gene_id", "gene_name")) %>%
+    mutate(dwui=wui-mean_wui) %>%
+    dplyr::select(gene_id, sgID_AB, wui, dwui)
+
+wui_gene_target_kd8 <- df_dwui_kd8 %>%
+    dplyr::select(gene_id, sgID_AB, wui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="wui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix
+
+dwui_gene_target_kd8 <- df_dwui_kd8 %>%
+    dplyr::select(gene_id, sgID_AB, dwui) %>%
+    pivot_wider(id_cols="gene_id", names_from="sgID_AB", values_from="dwui") %>%
+    column_to_rownames("gene_id") %>%
+    as.matrix 
+
+zdwui_target_gene_kd8 <- t(dwui_gene_target_kd8) %>% scale(center=FALSE)
+```
+
+## Clusters Indices
+```{r cluster_idx_kd8}
+idx_genes <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_kd8),
+           cluster_id %in% idx_clusters_genes) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_genes_null <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_kd8),
+           cluster_id %in% NULL_CLUSTERS) %>%
+    mutate(cluster_id=factor(cluster_id, levels=NULL_CLUSTERS)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_targets <- df_targets_kd6 %>%
+    filter(sgID_AB %in% rownames(zdwui_target_gene_kd8)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, target_gene) %$%
+    sgID_AB
+
+df_col_annots <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_kd8),
+           cluster_id %in% idx_clusters_genes) %>%
+    dplyr::select(gene_id, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    dplyr::rename(gene_cluster=cluster_id) %>%
+    column_to_rownames("gene_id")
+
+df_row_annots <- df_targets_kd6 %>%
+    filter(sgID_AB %in% rownames(zdwui_target_gene_kd8)) %>%
+    dplyr::select(sgID_AB, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    dplyr::rename(target_cluster=cluster_id) %>%
+    column_to_rownames("sgID_AB")
+
+gaps_col <- df_genes_kd6 %>%
+    filter(gene_id %in% colnames(zdwui_target_gene_kd8),
+           cluster_id %in% idx_clusters_genes) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_id) %$%
+    table(cluster_id) %>%
+    cumsum
+
+gaps_row <- df_targets_kd6 %>%
+    filter(sgID_AB %in% rownames(zdwui_target_gene_kd8)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, sgID_AB) %$%
+    table(cluster_id) %>%
+    cumsum
+```
+
+
+## Heatmap
+```{r plt_ordered_kd8, fig.width=8, fig.height=8}
+pheatmap(zdwui_target_gene_kd8[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=10,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none',
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE)
+```
+
+### Export Plot
+```{r export_kd8_heatmap}
+pheatmap(zdwui_target_gene_kd8[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_zdwui,
+         fontsize_col=1, fontsize_row=1,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none',
+         labels_row=sgid2gene[idx_targets],
+         labels_col=ens2gene[idx_genes],
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         filename=FILE_OUT_KD8_FINAL, width=16, height=16)
+```
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

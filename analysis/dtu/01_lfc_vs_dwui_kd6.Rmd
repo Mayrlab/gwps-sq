@@ -1,0 +1,724 @@
+---
+title: "Isoform TPMs - KD6 Essential"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Given the clusters of regulating targets and regulated response genes, we want to
+examine to what extent these are changes in expression levels of particular isoforms.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+library(SummarizedExperiment)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## input files
+FILE_WUI="tbl/df_wui_kd6_essential_ui10.Rds"
+
+CSV_TARGETS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+CSV_GENES="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+NULL_CLUSTERS=as.character(c(9,12,13))
+
+idx_clusters_targets <- as.character(c(14,18,11,16,13,9,12,2,5,15,1,6,8,3,7,4,10,17))
+idx_clusters_genes <- as.character(c(20,16,7,8,1,3,18,2,5,10,15,19,14,11,4,6,17))
+
+
+## output files
+FILE_OUT_SU_FINAL="img/heatmap-su-kd6-clusters.pdf"
+FILE_OUT_LU_FINAL="img/heatmap-lu-kd6-clusters.pdf"
+
+## aesthetics
+NCOLORS=100
+COLORS_BWR <- colorRampPalette(c("blue", "white", "red"))(NCOLORS)
+COLORS_MKY <- colorRampPalette(c("magenta", "black", "yellow"))(NCOLORS)
+COLORS_YKM <- colorRampPalette(c("yellow", "black", "magenta"))(NCOLORS)
+COLORS_RKG <- colorRampPalette(c("red", "black", "green"))(NCOLORS)
+breaks_l2fc <- seq(-2, 2, length.out=NCOLORS + 1)
+```
+
+# Data
+## Loading Data
+```{r load_data, message=FALSE}
+df_targets <- read_csv(CSV_TARGETS, col_types='cccc')
+df_genes <- read_csv(CSV_GENES, col_types='ccc')
+
+df_wui <- readRDS(FILE_WUI)
+```
+
+## Preprocessing
+
+```{r prepare_data}
+sgid2gene <- df_wui %>%
+    dplyr::select(sgID_AB, target_gene) %>%
+    distinct(sgID_AB, target_gene) %>%
+    deframe()
+
+ens2gene <- df_wui %>%
+    dplyr::select(gene_id, gene_name) %>%
+    distinct(gene_id, gene_name) %>%
+    deframe()
+
+convert_rownames <- function (mat, in2out) {
+    mat %>% set_rownames(in2out[rownames(.)])
+}
+
+convert_colnames <- function (mat, in2out) {
+    mat %>% set_colnames(in2out[colnames(.)])
+}
+
+df_ntp <- filter(df_wui, 
+                 target_gene == "non-targeting",
+                 gene_id %in% df_genes$gene_id) %>%
+    group_by(gene_id, gene_name) %>%
+    filter(!is.na(wui)) %>%
+    summarize(mean_tpm_su=weighted.mean(tpm_su, n_cells),
+              sd_tpm_su=sqrt(sum((tpm_su-mean_tpm_su)^2)/n()),
+              mean_tpm_lu=weighted.mean(tpm_lu, n_cells),
+              sd_tpm_lu=sqrt(sum((tpm_lu-mean_tpm_lu)^2)/n()),
+              mean_wui=weighted.mean(wui, n_cells),
+               .groups='drop')
+
+df_l2fc <- df_wui %>%
+    filter(sgID_AB %in% df_targets$sgID_AB,
+           gene_id %in% df_genes$gene_id) %>%
+    inner_join(df_ntp, by=c("gene_id", "gene_name")) %>%
+    mutate(l2fc_su=log2(tpm_su/mean_tpm_su),
+           l2fc_lu=log2(tpm_lu/mean_tpm_lu)) %>%
+    dplyr::select(gene_id, sgID_AB, tpm_su, l2fc_su, tpm_lu, l2fc_lu, mean_wui)
+
+l2fc_su_target_gene <- df_l2fc %>%
+    dplyr::select(gene_id, sgID_AB, l2fc_su) %>%
+    pivot_wider(id_cols="sgID_AB", names_from="gene_id", values_from="l2fc_su") %>%
+    column_to_rownames("sgID_AB") %>%
+    as.matrix
+
+l2fc_lu_target_gene <- df_l2fc %>%
+    dplyr::select(gene_id, sgID_AB, l2fc_lu) %>%
+    pivot_wider(id_cols="sgID_AB", names_from="gene_id", values_from="l2fc_lu") %>%
+    column_to_rownames("sgID_AB") %>%
+    as.matrix
+```
+
+## Clusters Indices
+```{r cluster_idx}
+idx_genes <- df_genes %>%
+    filter(gene_id %in% colnames(l2fc_su_target_gene),
+           cluster_id %in% idx_clusters_genes) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_genes_null <- df_genes %>%
+    filter(gene_id %in% colnames(l2fc_su_target_gene),
+           cluster_id %in% NULL_CLUSTERS) %>%
+    mutate(cluster_id=factor(cluster_id, levels=NULL_CLUSTERS)) %>%
+    arrange(cluster_id, gene_name) %$%
+    gene_id
+
+idx_targets <- df_targets %>%
+    filter(sgID_AB %in% rownames(l2fc_su_target_gene)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, target_gene) %$%
+    sgID_AB
+
+df_col_annots <- df_genes %>%
+    filter(gene_id %in% colnames(l2fc_su_target_gene),
+           cluster_id %in% idx_clusters_genes) %>%
+    dplyr::select(gene_id, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    dplyr::rename(gene_cluster=cluster_id) %>%
+    column_to_rownames("gene_id")
+
+df_row_annots <- df_targets %>%
+    filter(sgID_AB %in% rownames(l2fc_su_target_gene)) %>%
+    dplyr::select(sgID_AB, cluster_id) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    dplyr::rename(target_cluster=cluster_id) %>%
+    column_to_rownames("sgID_AB")
+
+gaps_col <- df_genes %>%
+    filter(gene_id %in% colnames(l2fc_su_target_gene),
+           cluster_id %in% idx_clusters_genes) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_genes)) %>%
+    arrange(cluster_id, gene_id) %$%
+    table(cluster_id) %>%
+    cumsum
+
+gaps_row <- df_targets %>%
+    filter(sgID_AB %in% rownames(l2fc_su_target_gene)) %>%
+    mutate(cluster_id=factor(cluster_id, levels=idx_clusters_targets)) %>%
+    arrange(cluster_id, sgID_AB) %$%
+    table(cluster_id) %>%
+    cumsum
+```
+
+
+# Heatmaps
+## SU
+```{r plt_ordered_su, fig.width=8, fig.height=8}
+pheatmap(l2fc_su_target_gene[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_l2fc,
+         fontsize_col=1, fontsize_row=10,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none',
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE)
+```
+
+
+## LU
+```{r plt_ordered_lu, fig.width=8, fig.height=8}
+pheatmap(l2fc_lu_target_gene[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_l2fc,
+         fontsize_col=1, fontsize_row=10,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=FALSE, show_rownames=FALSE, scale='none',
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE)
+```
+
+### Export Plot
+```{r export_heatmaps}
+pheatmap(l2fc_su_target_gene[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_l2fc,
+         fontsize_col=1, fontsize_row=1,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none',
+         labels_row=sgid2gene[idx_targets],
+         labels_col=ens2gene[idx_genes],
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         filename=FILE_OUT_SU_FINAL, width=16, height=16)
+
+pheatmap(l2fc_lu_target_gene[idx_targets, idx_genes], 
+         color=COLORS_BWR,
+         breaks=breaks_l2fc,
+         fontsize_col=1, fontsize_row=1,
+         annotation_row=df_row_annots, 
+         annotation_col=df_col_annots,
+         show_colnames=TRUE, show_rownames=TRUE, scale='none',
+         labels_row=sgid2gene[idx_targets],
+         labels_col=ens2gene[idx_genes],
+         annotation_names_row=FALSE, annotation_names_col=FALSE,
+         gaps_row=gaps_row,
+         gaps_col=gaps_col,
+         cluster_rows=FALSE, cluster_cols=FALSE,
+         filename=FILE_OUT_LU_FINAL, width=16, height=16)
+```
+
+
+# Example Targets
+## NUDT21
+```{r plt_nudt21, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "NUDT21")) %>%
+    ggplot(aes(x=l2fc_su, y=l2fc_lu)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(size=tpm_su+tpm_lu+0.1, color=mean_wui)) +
+    scale_size_continuous(range=c(0.01,1), trans="log10") +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="SU [log2(fold-change)]", 
+         y="LU [log2(fold-change)]",
+         size="TPM [SU+LU]", color="Mean WUI",
+         title="NUDT21") +
+    theme_bw()
+    
+```
+
+## CPSF6
+```{r plt_cpsf6, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "CPSF6")) %>%
+    ggplot(aes(x=l2fc_su, y=l2fc_lu)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(size=tpm_su+tpm_lu+0.1, color=mean_wui)) +
+    scale_size_continuous(range=c(0.01,1), trans="log10") +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="SU [log2(fold-change)]",
+         y="LU [log2(fold-change)]", 
+         size="TPM [SU+LU]", color="Mean WUI",
+         title="CPSF6") +
+    theme_bw()
+```
+
+## NUDT21 vs CPSF6
+### SU
+```{r plt_nudt21_v_cpsf6_su, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(NUDT21|CPSF6)")) %>%
+    left_join(df_targets, by="sgID_AB") %>%
+    dplyr::select(gene_id, target_gene, l2fc_su, l2fc_lu, mean_wui) %>%
+    pivot_wider(id_cols=c("gene_id", "mean_wui"), names_from="target_gene", 
+                values_from=c("l2fc_su", "l2fc_lu")) %>%
+    ggplot(aes(x=l2fc_su_NUDT21, y=l2fc_su_CPSF6)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(color=mean_wui), size=1) +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="NUDT21 [log2(fold-change SU)]", 
+         y="CPSF6 [log2(fold-change SU)]",
+         color="Mean WUI") +
+    theme_bw()
+```
+
+### LU
+```{r plt_nudt21_v_cpsf6_lu, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(NUDT21|CPSF6)")) %>%
+    left_join(df_targets, by="sgID_AB") %>%
+    dplyr::select(gene_id, target_gene, l2fc_su, l2fc_lu, mean_wui) %>%
+    pivot_wider(id_cols=c("gene_id", "mean_wui"), names_from="target_gene", 
+                values_from=c("l2fc_su", "l2fc_lu")) %>%
+    ggplot(aes(x=l2fc_lu_NUDT21, y=l2fc_lu_CPSF6)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(color=mean_wui), size=1) +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="NUDT21 [log2(fold-change LU)]", 
+         y="CPSF6 [log2(fold-change LU)]",
+         color="Mean WUI") +
+    theme_bw()
+```
+
+What is that gene in the top right?
+```{r tbl_top_lu_genes}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(NUDT21|CPSF6)")) %>%
+    left_join(df_targets, by="sgID_AB") %>%
+    filter(l2fc_lu > 2) %>% 
+    mutate(gene_name=ens2gene[as.character(gene_id)])
+```
+Nudt4. This turns out to really be more of the SU isoform, so not as strange as 
+this plot might indicate. The actual LU isoforms fell below the 10% usage minimum.
+
+## PAF1 Complex
+### PAF1
+```{r plt_paf1, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "PAF1")) %>%
+    ggplot(aes(x=l2fc_su, y=l2fc_lu)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(size=tpm_su+tpm_lu+0.1, color=mean_wui)) +
+    scale_size_continuous(range=c(0.01,1), trans="log10") +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="SU [log2(fold-change)]", 
+         y="LU [log2(fold-change)]",
+         size="TPM [SU+LU]", color="Mean WUI",
+         title="PAF1") +
+    theme_bw()
+```
+
+### RTF1
+```{r plt_rtf1, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "RTF1")) %>%
+    ggplot(aes(x=l2fc_su, y=l2fc_lu)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(size=tpm_su+tpm_lu+0.1, color=mean_wui)) +
+    scale_size_continuous(range=c(0.01,1), trans="log10") +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="SU [log2(fold-change)]", 
+         y="LU [log2(fold-change)]",
+         size="TPM [SU+LU]", color="Mean WUI",
+         title="RTF1") +
+    theme_bw()
+```
+
+### CTR9
+```{r plt_ctr9, fig.width=8, fig.height=6}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "CTR9")) %>%
+    ggplot(aes(x=l2fc_su, y=l2fc_lu)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_vline(xintercept=0, color='grey80') + 
+    geom_vline(xintercept=c(-1,1), linetype='dashed') + 
+    geom_point(aes(size=tpm_su+tpm_lu+0.1, color=mean_wui)) +
+    scale_size_continuous(range=c(0.01,1), trans="log10") +
+    scale_color_viridis_b(breaks=c(0,0.33,0.67,1), option="B") + 
+    labs(x="SU [log2(fold-change)]", 
+         y="LU [log2(fold-change)]",
+         size="TPM [SU+LU]", color="Mean WUI",
+         title="CTR9") +
+    theme_bw()
+```
+## Violin Plots
+### PAF1 Complex
+```{r plt_violin_paf1, fig.width=5, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(CTR9|RTF1|PAF1)")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### CF I
+```{r plt_violin_cf1, fig.width=5, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(NUDT21|CPSF6|OGFOD1)")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### CPSF Complex
+```{r plt_violin_cpsf, fig.width=6, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(CPSF1|CPSF2|CPSF3|CPSF4|WDR33|FIP1L1)")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### CF II
+```{r plt_violin_cf2, fig.width=4, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(PCF11|CLP1)")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### Nuclear Export Factors
+```{r plt_violin_nexfs, fig.width=8, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "(NXF1|THOC)")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### Splicing Factors
+```{r plt_violin_srsf, fig.width=5, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "SRSF")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+
+### CSTF
+```{r plt_violin_cstf, fig.width=4, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "CSTF")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### Exosome
+```{r plt_violin_exosome, fig.width=10, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "EXOSC")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### Proteosome
+```{r plt_violin_psm, fig.width=16, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "PSM[ABCD]")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### LSM
+```{r plt_violin_lsm, fig.width=8, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "LSM[0-9]")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+
+### RPL
+```{r plt_violin_rpl, fig.width=20, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "^RPL")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+### RPS
+```{r plt_violin_rps, fig.width=20, fig.height=8}
+df_l2fc %>%
+    filter(str_detect(sgID_AB, "^RPS")) %>%
+    mutate(target_gene=sgid2gene[sgID_AB], 
+           mean_wui_bin=cut(mean_wui, breaks=c(0,0.33,0.67,1.0)),
+           l2fc_su=ifelse(l2fc_su < -4, -4, l2fc_su),
+           l2fc_lu=ifelse(l2fc_lu < -4, -4, l2fc_lu)) %>%
+    dplyr::select(target_gene, gene_id, l2fc_su, l2fc_lu, mean_wui_bin) %>%
+    pivot_longer(cols=c("l2fc_su", "l2fc_lu"), 
+                 names_prefix="l2fc_", names_to="isoform", 
+                 values_to="l2fc") %>%
+    mutate(isoform=factor(toupper(isoform), c("SU", "LU"))) %>%
+    ggplot(aes(x=target_gene, y=l2fc)) +
+    geom_hline(yintercept=0, color='grey80') + 
+    geom_hline(yintercept=c(-1,1), linetype='dashed') + 
+    geom_violin(aes(fill=mean_wui_bin), position="dodge", draw_quantiles=c(0.25, 0.5, 0.75)) +
+    scale_fill_viridis_d(option="B", begin=0.4, end=0.9) + 
+    scale_y_continuous(limits=c(-4,4)) +
+    labs(x="Perturbation", 
+         y="log2(fold-change)",
+         fill="Mean WUI") +
+    facet_wrap(vars(isoform), nrow=2) +
+    theme_bw()
+```
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```
