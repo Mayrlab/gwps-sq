@@ -1,0 +1,287 @@
+---
+title: "Replicating Perturbations - Correlations with Clusters"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+# Purpose
+
+Here we compare the RPE1 with the K562 essential Perturb-seq experiments by computing the 
+correlations between Z-scaled dWUI values across experiments. The expectation is 
+that targeted genes in RPE1 will be most similar to the Z-dWUI of the cluster
+that the target was associated with in the K562 Perturb-seq data. In this case,
+we restrict ourselves to the genes that positively identified as significant genes
+in the particular target cluster.
+
+However, we also expect that difference in cell types (K562 vs RPE1) and 
+duration of experiment (6 vs 7 days) may contribute to variation in results, in 
+addition to random variation in representation due to multiplexing.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(ggbeeswarm)
+library(Matrix)
+library(matrixStats)
+library(pheatmap)
+library(caret)
+library(ggsignif)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## filtering options
+## number of cells in perturbation
+MIN_CELLS=30
+## max NTPs with NA WUI
+MAX_NTP_NA=0.20
+## min avg TPM in NTPs
+MIN_MEAN_TPM=20
+
+## with few replicates, we need a prior on minimum sd(WUI)
+## this avoids div by zero when computing Z-dWUI
+## when all baseline replicates have identical counts
+MIN_SD_WUI=0.01
+
+CSV_CLUSTERS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+CSV_CLUSTER_MAP="metadata/kd6-cluster-info-sm.csv"
+
+CSV_GENES="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+GENE_CLUSTERS_NONRESPONSE=c("9","12","13")
+
+## k562 data
+FILE_WUI_K562="tbl/df_wui_kd6_essential_ui10.Rds"
+FILE_DWUI_K562="data/dwui/20221107-dwui-target-gene-kd6-essential.Rds"
+FILE_ZDWUI_K562="data/dwui/20221107-zdwui-target-gene-kd6-essential.Rds"
+
+## rpe1 data
+FILE_WUI_RPE1="data/dwui/20231206-wui-target-gene-rd7-essential-kd6-matched.Rds"
+FILE_DWUI_RPE1="data/dwui/20231206-dwui-target-gene-rd7-essential-kd6-matched.Rds"
+FILE_ZDWUI_RPE1="data/dwui/20231206-zdwui-target-gene-rd7-essential-kd6-matched.Rds"
+
+TSV_MW_TEST="data/dwui/df_dwui_kd6_clusters.mw_test.tsv.gz"
+```
+
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_clusters <- read_csv(CSV_CLUSTERS, col_types='cccc')
+clust_old2new <- read_csv(CSV_CLUSTER_MAP, col_types='c___c__') %>% 
+    deframe %>% `[<-`('ntp', 'ntp')
+
+df_genes <- read_csv(CSV_GENES, col_types='ccc') %>% 
+    mutate(is_nonresponse=cluster_id %in% GENE_CLUSTERS_NONRESPONSE)
+idx_genes_clustered <- df_genes %>% filter(!is_nonresponse) %$% unique(gene_id)
+
+idx_target <- df_clusters$sgID_AB
+
+wui_gene_rd7 <- readRDS(FILE_WUI_RPE1)
+
+idx_sgID <- colnames(wui_gene_rd7)
+idx_sgID_targeted <- idx_sgID %>% { .[!str_detect(., "non-targeting")] }
+idx_sgID_ntp <- idx_sgID %>% { .[str_detect(., "non-targeting")] }
+
+df_clusters_rd7 <- tibble(sgID_AB=idx_sgID) %>% 
+    left_join(df_clusters, by=c("sgID_AB")) %>%
+    mutate(target_gene=replace_na(target_gene, "non-targeting"),
+           target_gene_id=replace_na(target_gene_id, "non-targeting"),
+           cluster_id=replace_na(cluster_id, "ntp"))
+
+sgid2cluster <- df_clusters_rd7 %>% 
+    dplyr::select(sgID_AB, cluster_id) %>% deframe
+
+
+dwui_gene_rd7 <- readRDS(FILE_DWUI_RPE1) %>% as.matrix
+zdwui_gene_rd7 <- readRDS(FILE_ZDWUI_RPE1) %>% as.matrix
+
+## common set of genes with zdwui values
+idx_gene <- intersect(rownames(zdwui_gene_rd7), idx_genes_clustered)
+
+wui_gene_ntp_rd7 <- wui_gene_rd7[,idx_sgID_ntp]
+
+dwui_gene_target <- readRDS(FILE_DWUI_K562) %>% t %>% `[`(idx_gene,)
+zdwui_gene_target <- readRDS(FILE_ZDWUI_K562) %>% t %>% `[`(idx_gene,)
+
+df_wui_kd6 <- readRDS(FILE_WUI_K562) %>%
+    filter(gene_id %in% idx_gene)
+
+df_ntp <- df_wui_kd6 %>% filter(target_gene == "non-targeting")
+
+wui_gene_ntp_kd6 <- df_ntp %>%
+    dplyr::select(gene_id, sgID_AB, wui) %>%
+    mutate(across(any_of(c("gene_id", "sgID_AB")), as.character)) %>%
+    pivot_wider(id_cols=c("gene_id"), names_from="sgID_AB", values_from="wui") %>%
+    column_to_rownames("gene_id") %>% as.matrix
+
+wui_gene_target <- df_wui_kd6 %>%
+    filter(sgID_AB %in% df_clusters$sgID_AB) %>%
+    dplyr::select(gene_id, sgID_AB, wui) %>%
+    mutate(across(any_of(c("gene_id", "sgID_AB")), as.character)) %>%
+    pivot_wider(id_cols=c("gene_id"), names_from="sgID_AB", values_from="wui") %>%
+    column_to_rownames("gene_id") %>% as.matrix
+
+idx_targets <- colnames(wui_gene_target)
+
+df_tests <- read_tsv(TSV_MW_TEST)
+```
+
+## Summarize Clusters
+```{r cluster_avg}
+## design matrix
+M_target_cluster <- df_clusters %$%
+    setNames(cluster_id, sgID_AB) %>%
+    fac2sparse %>% t %>%
+    `[`(idx_targets,)
+
+## averaging matrix
+N_target_cluster <- M_target_cluster %>%
+    { . %*% Diagonal(ncol(.), 1/colSums(.), names=TRUE) }
+
+## average wui, dwui, zdwui
+awui_gene_cluster <- wui_gene_target %*% N_target_cluster
+adwui_gene_cluster <- dwui_gene_target[,idx_targets] %*% N_target_cluster
+adwui_gene_cluster[is.na(adwui_gene_cluster)] <- 0
+azdwui_gene_cluster <- zdwui_gene_target[,idx_targets] %*% N_target_cluster
+azdwui_gene_cluster[is.na(azdwui_gene_cluster)] <- 0
+```
+
+## Compare Baselines
+```{r compare_baseline, fig.width=4, fig.height=3.5}
+df_baseline <- tibble(
+    gene_id=idx_gene,
+    mu_wui_ntp_kd6=rowMeans(wui_gene_ntp_kd6[idx_gene,], na.rm=TRUE),
+    mu_wui_ntp_rd7=rowMeans(wui_gene_ntp_rd7[idx_gene,], na.rm=TRUE))
+
+df_baseline %>%
+    ggplot(aes(x=mu_wui_ntp_kd6, y=mu_wui_ntp_rd7)) +
+    geom_point(size=0.3) +
+    geom_abline(linetype='dashed', color='cyan4') +
+    lims(x=c(0,1), y=c(0,1)) +
+    labs(x="Mean WUI [K562 - Perturb Control]",
+         y="Mean WUI [RPE1 - Perturb Control]") +
+    theme_bw()
+
+df_baseline %>%
+    ggplot(aes(x=mu_wui_ntp_rd7 - mu_wui_ntp_kd6)) +
+    geom_histogram(fill='grey80', color='black', linewidth=0.2, binwidth=0.025) +
+    lims(x=c(-0.5,0.5)) +
+    scale_y_continuous(expand=c(0,0,0.1,0)) +
+    labs(x="Difference Mean WUI [RPE1 - K562]",
+         y="Genes") +
+    theme_bw()
+```
+
+## Correlations
+```{r correlations_combined, fig.width=6, fig.height=4}
+CLUSTER_ORDER=c(1:18, "ntp")
+
+sig_genes <- df_tests %>%
+    filter(gene_id %in% rownames(zdwui_gene_rd7),
+           !is.na(p.adj), p.adj <= 0.05) %>%
+    dplyr::select(cluster_id, gene_id) %>%
+    split(.$cluster_id) %>%
+    lapply(function (x) x$gene_id)
+
+df_pearson_zz <- lapply(names(sig_genes), function (clust) {
+    idx_sig_genes <- sig_genes[[clust]]
+    idx_sgID_rd7 <- filter(df_clusters_rd7, cluster_id %in% c('ntp', clust)) %$% sgID_AB
+    cor(zdwui_gene_rd7[idx_sig_genes, idx_sgID_rd7], 
+        azdwui_gene_cluster[idx_sig_genes,clust], method='pearson') %>%
+        `colnames<-`(c(clust)) %>%
+        as_tibble(rownames='sample_id') %>%
+        pivot_longer(cols=-1, names_to="cluster_id", values_to="rho_pearson_zz")
+}) %>%
+    do.call(what=rbind) %>%
+    mutate(cluster_id_new=factor(clust_old2new[cluster_id], levels=CLUSTER_ORDER),
+           is_ntp=str_detect(sample_id, "non-targeting"))
+
+q_values <- df_pearson_zz %>% group_by(cluster_id_new) %>% nest() %>%
+    transmute(test_res=map(data, ~ broom::tidy(wilcox.test(formula=rho_pearson_zz ~ is_ntp, 
+                                               data=.x, alternative='greater')))) %>%
+    unnest(test_res) %>%
+    ungroup() %>%
+    mutate(q.value=p.adjust(p.value, method='BH')) %>%
+    dplyr::select(cluster_id_new, q.value) %>%
+    deframe %>%
+    `[`(as.character(1:18)) %>% {case_when(
+        . < 0.001 ~ '***',
+        . < 0.01  ~ '**',
+        . < 0.05  ~ '*',
+        TRUE ~ "NA"
+    )}
+
+df_pearson_zz %>%
+    ggplot(aes(x=cluster_id_new, y=rho_pearson_zz, color=!is_ntp)) +
+    geom_boxplot(position=position_dodge(width = 0.9), outlier.shape=NA, linewidth=0.25) +
+    geom_quasirandom(dodge.width = 0.9, varwidth = TRUE, size=0.15) +
+    geom_signif(y_position=0.78, tip_length=0,
+                xmin=seq(0.75, 17.75, by=1), xmax=seq(1.25, 18.25, by=1),
+                annotations=q_values) +
+    scale_color_manual(values=c('black', 'steelblue'), guide=guide_none()) +
+    scale_y_continuous(expand=c(0.1,0)) +
+    labs(x="Cluster", y="Correlation (Pearson's rho)") +
+    theme_bw()
+
+ggsave("img/ed5j-rd7-kd6-cluster-zdwui-correlations-sig-genes.pdf", 
+       width=6, height=4, dpi=300)
+```
+
+```{r summarize_counts}
+df_pearson_zz %>% filter(is_ntp) %>% distinct(sample_id) %>% nrow() %>%
+    sprintf(fmt="We have %d non-targeting perturbations") %>%
+    print()
+
+df_pearson_zz %>% filter(!is_ntp) %>% nrow() %>%
+    sprintf(fmt="We have %d targeting perturbations") %>%
+    print()
+
+df_pearson_zz %>% filter(!is_ntp) %>% dplyr::count(cluster_id_new) %$% summary(n)
+
+df_pearson_zz %>% filter(!is_ntp) %>% dplyr::count(cluster_id_new) %>%
+    ggplot(aes(x=cluster_id_new, y=n)) +
+    geom_bar(stat='identity') +
+    geom_text(aes(label=n), vjust=-1) +
+    scale_y_continuous(expand=c(0,0,0.1,0)) +
+    theme_bw()
+
+```
+
+
+# Conclusion
+
+We find that every cluster has significantly higher correlations with the set of
+associated perturbations in the RPE1 cells compared to the non-targeting controls.
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

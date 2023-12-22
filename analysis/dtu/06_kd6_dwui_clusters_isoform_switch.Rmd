@@ -1,0 +1,184 @@
+---
+title: "Isoform Switching in Differential WUI Genes"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+Reviewer asked how many of the dWUI events correspond to actual isoform switches.
+We could define this in two ways:
+
+  1. Majority isoform. Does an isoform go from less than half to more than half?
+  2. Mode isoform. Does the mode change?
+
+For two-UTR genes, these two questions coincide. However, we will simply consider
+version **(2)** of the question.
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(broom)
+library(BiocParallel)
+library(SummarizedExperiment)
+library(Matrix)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+MIN_TPM=5
+
+FILE_CLUSTERS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+FILE_CLUSTERS_NEW="metadata/kd6-cluster-info-sm.csv"
+FILE_DWUI="data/dwui/df_dwui_kd6_clusters.mw_test.tsv.gz"
+FILE_SE="data/se/kd6_essential_bulk_expressed.Rds"
+```
+
+## Functions
+
+```{r methods}
+
+```
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_clusters <- read_csv(FILE_CLUSTERS) %>%
+    mutate(cluster_id=as.character(cluster_id))
+
+old2new <- read_csv(FILE_CLUSTERS_NEW, col_types='c___c__') %>%
+    deframe()
+    
+df_tests <- read_tsv(FILE_DWUI)
+
+se <- readRDS(FILE_SE) %>%
+    ## only care about what was tested
+    `[`(rowData(.)$gene_id %in% df_tests$gene_id,) %>%
+    ## no IPA
+    `[`(!rowData(.)$is_ipa,)
+
+idx_ntp <- se$target_gene == 'non-targeting'
+idx_clusters <- se$sgID_AB %in% df_clusters$sgID_AB
+
+se %<>% `[`(,idx_clusters | idx_ntp)
+
+## attach cluster IDs
+colData(se) %<>% as_tibble %>%
+    left_join(df_clusters, by=c("target_gene", "target_gene_id", "sgID_AB")) %>%
+    mutate(cluster_id=ifelse(is.na(cluster_id), 0, cluster_id)) %>%
+    DataFrame(row.names=.$sgID_AB)
+```
+
+## Preprocessing
+```{r prepare_data}
+M_target_cluster <- fac2sparse(se$cluster_id) %>% t
+
+cts_tx_cluster <- assay(se, 'counts') %*% M_target_cluster
+
+df_rd <- rowData(se) %>% as_tibble %>%
+    dplyr::select(any_of(c('transcript_id', 'gene_id', 'utr_rank')))
+
+df_txs <- as.matrix(cts_tx_cluster) %>%
+    as_tibble(rownames='transcript_id') %>%
+    inner_join(x=df_rd, by='transcript_id') %>%
+    group_by(gene_id) %>%
+    mutate(is_ntp_mode=max(`0`) == `0`,
+           ntp_mode_frac=max(`0`)/sum(`0`)) %>%
+    pivot_longer(any_of(as.character(0:18)), names_to="cluster_id", values_to="counts")
+
+df_switches <- df_txs %>%
+    filter(cluster_id != "0") %>%
+    group_by(gene_id, cluster_id, ntp_mode_frac) %>%
+    mutate(is_cluster_mode=max(counts) == counts) %>%
+    summarize(has_switched=any(is_cluster_mode != is_ntp_mode), .groups='drop',
+              mode_frac=max(counts)/sum(counts))
+
+df_combined <- df_tests %>%
+    mutate(cluster_id=as.character(cluster_id)) %>%
+    left_join(df_switches, by=c("gene_id", "cluster_id")) %>%
+    mutate(cluster_id_new=old2new[cluster_id])
+```
+
+
+# Analysis
+
+## Number of Switches per Cluster
+
+```{r plt_switch, fig.width=6, fig.height=4}
+df_combined %>%
+    filter(has_switched, p.adj <= 0.05) %>%
+    ggplot(aes(x=factor(as.numeric(cluster_id_new)))) +
+    geom_bar(fill='grey90', color='black') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    labs(x="Cluster", y="Number of Isoform Switching Genes (FDR < 0.05)") +
+    theme_bw()
+
+ggsave("img/ed4i-kd6-dwui-isoform-switching-counts.pdf", width=6, height=4, dpi=300)
+
+df_combined %>%
+    filter(p.adj <= 0.05) %>%
+    ggplot(aes(x=factor(as.numeric(cluster_id_new)), fill=has_switched)) +
+    geom_bar(position='fill', color='black') +
+    scale_y_continuous(expand=c(0,0,0.05,0)) +
+    scale_fill_manual(values=c('grey90', 'steelblue1')) +
+    labs(x="Cluster", y="Fraction of Isoform Switching Genes (FDR < 0.05)",
+         fill="Isoform\nSwitching") +
+    theme_bw()
+
+ggsave("img/ed4i-kd6-dwui-isoform-switching-fraction.pdf", width=6, height=4, dpi=300)
+
+df_combined %>%
+    filter(p.adj <= 0.05) %>%
+    group_by(cluster_id_new) %>%
+    summarize(frac_switched=mean(has_switched), .groups='drop') %>%
+    ggplot(aes(x=factor(as.numeric(cluster_id_new)), y=frac_switched)) +
+    geom_bar(stat='identity', color='black', fill='steelblue1') +
+    scale_y_continuous(expand=c(0,0,0,0), limits=c(0,0.4)) +
+    labs(x="Cluster", y="Fraction of Isoform Switching Genes (FDR < 0.05)",
+         fill="Isoform\nSwitching") +
+    theme_bw()
+
+ggsave("img/ed4i-kd6-dwui-isoform-switching-fraction-zoom.pdf", width=6, height=4, dpi=300)
+```
+
+# Conclusion
+
+<!--
+What was found?
+Clearly state conclusions.
+Was there anything unexpected?
+Are there unanswered questions?
+What should be worked on next?
+-->
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```

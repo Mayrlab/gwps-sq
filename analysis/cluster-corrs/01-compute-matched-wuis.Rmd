@@ -1,0 +1,225 @@
+---
+title: "Replicating Perturbations - Computing Matched WUIs"
+author: "Mervin M Fansler"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output: 
+  html_document: 
+    code_folding: show
+    toc: true
+    toc_float: true
+---
+
+# Purpose
+
+We would like to compare the RPE1 with the K562 essential Perturb-seq experiments 
+by computing the correlations between Z-scaled dWUI values across experiments. 
+First, we must compute comparable WUI values using the same isoforms as were used
+in the K562 essential data.
+
+We can also use this to compare the baseline (non-targeting pertubations).
+
+# Initialization
+
+## Libraries
+```{r libs, message=FALSE, warning=FALSE}
+library(magrittr)
+library(tidyverse)
+library(ggbeeswarm)
+library(Matrix)
+library(matrixStats)
+library(SummarizedExperiment)
+library(pheatmap)
+library(caret)
+```
+
+## Parameters
+```{r set_params}
+set.seed(20210818)
+
+## filtering options
+## number of cells in perturbation
+MIN_CELLS=30
+## max NTPs with NA WUI
+MAX_NTP_NA=0.20
+## min avg TPM in NTPs
+MIN_MEAN_TPM=20
+
+## with few replicates, we need a prior on minimum sd(WUI)
+## this avoids div by zero when computing Z-dWUI
+## when all baseline replicates have identical counts
+MIN_SD_WUI=0.01
+
+## inputs
+FILE_SE="data/se/rd7_essential_bulk_expressed.Rds"
+FILE_UTRS="../gwps/tbl/df_utrs_kd6_essential_ui10.csv"
+
+FILE_GENES="tbl/df_gene_nnclusters_kd6_essential_ui10.csv"
+GENE_CLUSTERS_NONRESPONSE=c("9","12","13")
+
+FILE_CLUSTERS="tbl/df_target_nnclusters_kd6_essential_ui10.csv"
+FILE_CLUSTER_MAP="metadata/kd6-cluster-info-sm.csv"
+
+## output files
+date_str <- format(Sys.Date(), "%Y%m%d")
+FILE_WUI_RPE1=sprintf("data/dwui/%s-wui-target-gene-rd7-essential-kd6-matched.Rds", date_str)
+FILE_DWUI_RPE1=sprintf("data/dwui/%s-dwui-target-gene-rd7-essential-kd6-matched.Rds", date_str)
+FILE_ZDWUI_RPE1=sprintf("data/dwui/%s-zdwui-target-gene-rd7-essential-kd6-matched.Rds", date_str)
+
+
+## visuals
+NCOLORS=100
+COLORS_BWR <- colorRampPalette(c("blue", "white", "red"))(NCOLORS)
+
+BREAKS_DWUI <- seq(-0.8, 0.8, length.out=NCOLORS + 1)
+BREAKS_ZDWUI <- seq(-6, 6, length.out=NCOLORS + 1)
+BREAKS_ZDWUI_BROAD <- seq(-10, 10, length.out=NCOLORS + 1)
+```
+
+
+# Data
+## Loading
+```{r load_data, message=FALSE}
+df_utrs <- read_csv(FILE_UTRS)
+df_genes <- read_csv(FILE_GENES, col_types='ccc') %>% 
+    mutate(is_nonresponse=cluster_id %in% GENE_CLUSTERS_NONRESPONSE)
+df_clusters <- read_csv(FILE_CLUSTERS, col_types='cccc')
+
+se_tx_target <- readRDS(FILE_SE)
+```
+
+## Filtering
+```{r filtering}
+## consider only genes used in Perturb-seq clustering
+idx_genes <- df_genes %>% filter(!is_nonresponse) %$% unique(gene_id)
+idx_txs <- df_utrs %>% 
+    filter(gene_id %in% idx_genes,
+           transcript_id %in% rownames(se_tx_target)) %$% 
+    unique(transcript_id)
+
+se_tx_target %<>% `[`(idx_txs, .$n_cells >= MIN_CELLS)
+
+## attach UTR annotations from K562 Perturb-seq
+rowData(se_tx_target) %<>% as_tibble %>%
+    left_join(df_utrs, by=c("transcript_id", "transcript_name", 
+                            "gene_id", "gene_name", "utr_rank")) %>%
+    mutate(seqnames=NULL, end=NULL, strand=NULL) %>%
+    DataFrame(row.names=.$transcript_id) %>%
+    `[`(idx_txs,)
+
+idx_ntp_rd7 <- colnames(se_tx_target) %>% { .[str_detect(., "non-targeting")] }
+idx_target_rd7 <- colnames(se_tx_target) %>% { .[. %in% df_clusters$sgID_AB] }
+
+se_tx_target %<>% `[`(, c(idx_ntp_rd7, idx_target_rd7))
+
+## cluster annotations
+id2cluster <- c(
+    setNames(rep_along(idx_ntp_rd7, "ntp"), idx_ntp_rd7),
+    deframe(df_clusters[,c("sgID_AB", "cluster_id")])
+)
+
+df_annots <- enframe(id2cluster, name='rownames', value='cluster_id') %>%
+    column_to_rownames('rownames') %>%
+    as.data.frame
+```
+
+## WUIs
+
+```{r wuis}
+cts_tx_target <- assay(se_tx_target, "counts")
+
+M_gene_tx <- rowData(se_tx_target) %>% as_tibble %>%
+    dplyr::select(transcript_id, gene_id) %>%
+    deframe %>%
+    fac2sparse
+
+cts_gene_target <- M_gene_tx %*% cts_tx_target
+
+ui_tx_target <- cts_tx_target / (t(M_gene_tx) %*% cts_gene_target)
+
+wt_tx <- rowData(se_tx_target) %>% as_tibble %>%
+    dplyr::select(transcript_id, utr_wt) %>% deframe
+
+wui_gene_target <- M_gene_tx %*% Diagonal(length(wt_tx), wt_tx) %*% ui_tx_target
+```
+
+## dWUIs
+```{r dwuis, fig.width=8, fig.height=6}
+## identify genes that are sufficiently expressed in the 
+## NTPs to compute WUIs
+idx_genes <- rowMeans(is.na(wui_gene_target[,idx_ntp_rd7])) %>%
+    { names(.)[. <= MAX_NTP_NA] }
+
+wui_gene_target %<>% `[`(idx_genes,)
+
+awui_ntp <- rowMeans(wui_gene_target[,idx_ntp_rd7], na.rm=TRUE)
+
+dwui_gene_target <- apply(wui_gene_target, 2, function (x) x - awui_ntp)
+dwui_gene_target[is.na(dwui_gene_target)] <- 0
+
+pheatmap(t(dwui_gene_target[,idx_target_rd7]), 
+         show_colnames=FALSE, show_rownames=FALSE,
+         scale='none', treeheight_row=0, treeheight_col=0,
+         color=COLORS_BWR, breaks=BREAKS_DWUI, annotation_row=df_annots)
+
+pheatmap(t(dwui_gene_target[,idx_target_rd7]), 
+         show_colnames=FALSE, show_rownames=FALSE,
+         scale='column', treeheight_row=0, treeheight_col=0,
+         color=COLORS_BWR, breaks=BREAKS_ZDWUI, annotation_row=df_annots)
+```
+
+## Z-dWUIs
+```{r zdwuis, fig.width=8, fig.height=6}
+swui_ntp <- rowSds(as.matrix(wui_gene_target[, idx_ntp_rd7]), na.rm=TRUE)
+## set minimum stdev
+swui_ntp[swui_ntp < MIN_SD_WUI] <- MIN_SD_WUI
+
+zdwui_gene_target <- apply(dwui_gene_target, 2, function (x) x/swui_ntp)
+
+pheatmap(t(zdwui_gene_target[,idx_target_rd7]), 
+         show_colnames=FALSE, show_rownames=FALSE,
+         treeheight_col=0, treeheight_row=0,
+         scale='none', annotation_row=df_annots, 
+         color=COLORS_BWR, breaks=BREAKS_ZDWUI)
+
+pheatmap(t(zdwui_gene_target[,idx_target_rd7]), 
+         show_colnames=FALSE, show_rownames=FALSE,
+         treeheight_col=0, treeheight_row=0,
+         scale='none', annotation_row=df_annots, 
+         color=COLORS_BWR, breaks=BREAKS_ZDWUI_BROAD)
+```
+
+# Export
+```{r export}
+saveRDS(wui_gene_target, file=FILE_WUI_RPE1)
+saveRDS(dwui_gene_target, file=FILE_DWUI_RPE1)
+saveRDS(zdwui_gene_target, file=FILE_ZDWUI_RPE1)
+```
+
+# Conclusion
+
+We can coherently compute Z-dWUIs for `r nrow(zdwui_gene_target)` genes in 
+`r ncol(zdwui_gene_target[,idx_target_rd7])` targets that correspond with the targets
+that had clustering in the K562 essential screen. The baseline is estimated with 
+`r ncol(zdwui_gene_target[,idx_ntp_rd7])` non-targeting perturbations.
+
+---
+
+# Runtime Details
+## Session Info
+```{r sesh_info, echo=FALSE}
+sessionInfo()
+```
+
+## Conda Environment
+```{bash comment="", echo=FALSE}
+if ! command -v conda &> /dev/null
+then
+  echo "Conda not detected."
+elif [ -z "${CONDA_PREFIX}" ]
+then
+  echo "No active Conda environment."
+else
+  echo "## Conda Environment YAML"
+  conda env export
+fi
+```
