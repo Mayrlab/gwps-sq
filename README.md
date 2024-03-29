@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/532343780.svg)](https://zenodo.org/doi/10.5281/zenodo.10895729)
+
 ## Overview
 
 This repository provides initial analysis of [K562 and RPE1 Perturb-seq data](https://gwps.wi.mit.edu) 
