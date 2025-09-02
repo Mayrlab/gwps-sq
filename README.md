@@ -11,7 +11,10 @@ analysis using the RD7 (RPE1 7-day essential screen) data.
 
 Additionally analyses downstream of this are included in [the `scUTRquant-figures` repository](https://github.com/Mayrlab/scUTRquant-figures).
 
-A preprint of the results are reported in [Fansler et al., bioRxiv, 2023](https://www.biorxiv.org/content/10.1101/2021.11.22.469635v2).
+The accompanying manuscript is openly available at:
+
+> Fansler, M.M., Mitschka, S. & Mayr, C. Quantifying 3′UTR length from scRNA-seq data reveals changes independent of gene expression. *Nat Commun* **15**, 4050 (2024). [https://doi.org/10.1038/s41467-024-48254-9](https://doi.org/10.1038/s41467-024-48254-9)
+
 
 ## Organization
 The folders in the repository have the following purposes:
